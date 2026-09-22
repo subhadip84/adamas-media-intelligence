@@ -1,0 +1,8 @@
+source_code,name,website,rss_url,language,coverage,active,decision
+SRC-PIB-001,PIB National,https://www.pib.gov.in/,https://pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=1,English + Indian Languages,Government / National,false,PILOT CANDIDATE – approval required
+SRC-IE-001,The Indian Express,https://indianexpress.com/,https://indianexpress.com/section/india/feed/,English,National + Cities,false,HOLD – legal approval required
+SRC-TOI-001,The Times of India,https://timesofindia.indiatimes.com/,,English,National + Cities,false,DO NOT INGEST without licence
+SRC-NDTV-001,NDTV,https://www.ndtv.com/,,English / Hindi,National + International,false,DO NOT INGEST without written permission
+SRC-IT-001,India Today,https://www.indiatoday.in/,,English,National,false,DO NOT INGEST without written permission
+SRC-ABP-001,Anandabazar Patrika,https://www.anandabazar.com/,,Bengali,West Bengal + National,false,HOLD – investigate official feed/licensing
+SRC-TEL-001,The Telegraph India,https://www.telegraphindia.com/,,English,National + West Bengal,false,HOLD – investigate official feed/licensing

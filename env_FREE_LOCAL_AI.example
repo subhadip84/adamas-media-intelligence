@@ -1,0 +1,7 @@
+# Adamas Media Intelligence - FREE LOCAL AI
+AI_SEARCH_ENABLED=true
+AI_SEARCH_MODEL=qwen3-embedding:0.6b
+AI_RERANK_CANDIDATES=12
+AI_SEARCH_TIMEOUT_SECONDS=60
+
+# No OPENAI_API_KEY is required for local AI semantic search.
