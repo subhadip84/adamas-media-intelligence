@@ -41,3 +41,7 @@ backend/app/*backup*.py
 backend/app/main_OLD_AI_BACKUP.py
 frontend/index_1.html
 frontend/index_2.html
+
+# Database backups
+*.sql
+*.dump
