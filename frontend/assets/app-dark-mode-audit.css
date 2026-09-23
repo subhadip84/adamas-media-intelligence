@@ -1,0 +1,254 @@
+
+/* =========================================================
+   V4 DARK MODE COMPLETE AUDIT
+   Final additive override. No feature/handler changes.
+   Covers quota, buttons, inline-white surfaces, forms,
+   management screens, modals, cards and native controls.
+========================================================= */
+html:has(body.ami-dark){
+  color-scheme:dark!important;
+  background:#08111d!important;
+}
+body.ami-dark{
+  background:#08111d!important;
+  color:#e8f1f8!important;
+}
+
+/* Search usage / quota: make the usage number and label explicit */
+.ami-dark .quota-card{
+  background:#0e1d2c!important;
+  border-color:#294055!important;
+  color:#e8f1f8!important;
+}
+.ami-dark .quota-card .sidebar-title{color:#dce9f5!important}
+.ami-dark .quota-circle{
+  background:#102438!important;
+  color:#f5f9fd!important;
+  border:8px solid #29445a!important;
+  border-top-color:#55aaf0!important;
+  box-shadow:inset 0 0 0 6px #162f45!important,
+             0 8px 22px rgba(0,0,0,.25)!important;
+  text-shadow:0 1px 1px rgba(0,0,0,.35)!important;
+}
+.ami-dark .quota-text{
+  color:#b9cad9!important;
+}
+
+/* Universal button baseline: eliminate accidental white buttons */
+.ami-dark button{
+  color:#e8f1f8!important;
+  background:#13283d!important;
+  border-color:#365069!important;
+  text-shadow:none!important;
+}
+.ami-dark button:hover:not(:disabled){
+  background:#19364f!important;
+  border-color:#4e7fa7!important;
+  color:#ffffff!important;
+}
+.ami-dark button:disabled{
+  background:#172635!important;
+  color:#71879a!important;
+  border-color:#2a3b4b!important;
+  opacity:.82!important;
+}
+
+/* Preserve intentional navigation/header controls */
+.ami-dark .nav-link{
+  background:transparent!important;
+  color:#b9cadb!important;
+  border-color:transparent!important;
+}
+.ami-dark .nav-link:hover,
+.ami-dark .nav-link:focus-visible,
+.ami-dark .nav-link.active{
+  background:#142a40!important;
+  color:#ffffff!important;
+}
+.ami-dark .search-button,
+.ami-dark .primary-button,
+.ami-dark .admin-button{
+  background:#1769a6!important;
+  border-color:#1769a6!important;
+  color:#ffffff!important;
+}
+.ami-dark .search-button:hover,
+.ami-dark .primary-button:hover,
+.ami-dark .admin-button:hover{
+  background:#2080c5!important;
+  border-color:#2080c5!important;
+}
+.ami-dark .user-button,
+.ami-dark .ami-theme-toggle,
+.ami-dark .ami-command-hint{
+  background:#12263a!important;
+  color:#e8f1f8!important;
+  border-color:#30475d!important;
+}
+.ami-dark .ami-theme-toggle{color:#ffd76a!important}
+.ami-dark .ami-command-hint span{color:#a9bfd3!important}
+
+/* White inline / legacy surfaces */
+.ami-dark .info-card,
+.ami-dark .info-section,
+.ami-dark .contact-card,
+.ami-dark .about-metric,
+.ami-dark .about-metrics,
+.ami-dark .source-card,
+.ami-dark .stats-card,
+.ami-dark .mi-shell,
+.ami-dark .mi-card,
+.ami-dark .mi-item,
+.ami-dark .mi-list,
+.ami-dark .ami-trend-inner,
+.ami-dark .ami-kpi,
+.ami-dark .ami-coverage-card,
+.ami-dark .sidebar-card,
+.ami-dark .filter-panel,
+.ami-dark .article-card{
+  background:#0e1d2c!important;
+  color:#dce8f3!important;
+  border-color:#294055!important;
+}
+.ami-dark .info-section,
+.ami-dark .info-card,
+.ami-dark .contact-card{
+  box-shadow:0 8px 24px rgba(0,0,0,.18)!important;
+}
+
+/* Inputs, selects and file controls */
+.ami-dark input,
+.ami-dark textarea,
+.ami-dark select,
+.ami-dark option,
+.ami-dark input[type="file"]{
+  background:#0d1b2a!important;
+  color:#edf5fb!important;
+  border-color:#30485f!important;
+  color-scheme:dark!important;
+}
+.ami-dark input::placeholder,
+.ami-dark textarea::placeholder{color:#8197aa!important;opacity:1!important}
+.ami-dark select option{background:#0d1b2a!important;color:#edf5fb!important}
+.ami-dark input[type="file"]::file-selector-button{
+  background:#17334c!important;
+  color:#eaf4fb!important;
+  border:1px solid #3b5b75!important;
+  border-radius:7px!important;
+  padding:7px 10px!important;
+  margin-right:9px!important;
+}
+
+/* Search bar — no black patch */
+.ami-dark .search-panel,
+.ami-dark .search-panel input,
+.ami-dark .search-panel .search-input-wrap{
+  background:#102235!important;
+  color:#f2f7fb!important;
+  border-color:#3a526a!important;
+}
+.ami-dark .search-panel input::placeholder{color:#8fa5b9!important}
+
+/* Management tables */
+.ami-dark .table-wrap,
+.ami-dark table,
+.ami-dark .data-table,
+.ami-dark .management-table{
+  background:#0d1b2a!important;
+  color:#dce8f3!important;
+  border-color:#294055!important;
+}
+.ami-dark table thead,
+.ami-dark .table-head,
+.ami-dark .management-table thead{
+  background:#13283d!important;
+  color:#e5eff7!important;
+}
+.ami-dark table th{background:#13283d!important;color:#e5eff7!important;border-color:#294055!important}
+.ami-dark table td{background:#0d1b2a!important;color:#c7d6e4!important;border-color:#263d52!important}
+.ami-dark table tbody tr:hover td{background:#12283d!important}
+
+/* All common secondary/action buttons */
+.ami-dark .table-action,
+.ami-dark .reset-filter,
+.ami-dark .save-search-top,
+.ami-dark .mi-btn,
+.ami-dark .secondary-button,
+.ami-dark .outline-button,
+.ami-dark .action-button,
+.ami-dark .modal-button,
+.ami-dark .form-button,
+.ami-dark .info-page-close,
+.ami-dark .mi-close{
+  background:#13283d!important;
+  color:#dcebf7!important;
+  border-color:#365069!important;
+}
+.ami-dark .table-action.primary,
+.ami-dark .mi-btn.primary{background:#1769a6!important;color:#fff!important;border-color:#1769a6!important}
+.ami-dark .saved-search-active{background:#163a58!important;color:#8ed0ff!important;border-color:#4c9bd1!important}
+
+/* Destructive actions remain visually distinct */
+.ami-dark button[style*="color:#a42525"],
+.ami-dark button[style*="color: #a42525"]{
+  background:#3a1d24!important;
+  color:#ff9da9!important;
+  border-color:#7b3a47!important;
+}
+
+/* Modal/dialog surfaces and their controls */
+.ami-dark .modal-box,
+.ami-dark .modal-content,
+.ami-dark .dialog-box,
+.ami-dark .app-modal,
+.ami-dark .ami-command-box{
+  background:#102235!important;
+  color:#e7eff8!important;
+  border-color:#30485f!important;
+}
+.ami-dark .modal-box label,
+.ami-dark .modal-content label,
+.ami-dark .dialog-box label{color:#cbd9e6!important}
+
+/* Intelligence Hub */
+.ami-dark .mi-head{background:linear-gradient(135deg,#0d3154,#155d91)!important;color:#fff!important}
+.ami-dark .mi-body{background:#0b1724!important}
+.ami-dark .mi-empty{color:#94a9bc!important}
+.ami-dark .mi-brief{color:#b7c8d7!important}
+.ami-dark .mi-timeline{border-color:#31516a!important}
+.ami-dark .mi-timeline .mi-item:before{border-color:#102235!important}
+
+/* Status / labels / badges */
+.ami-dark .ami-trend-chip,
+.ami-dark .ami-region,
+.ami-dark .mi-chip,
+.ami-dark .article-category,
+.ami-dark .subscriber-badge{
+  background:#163149!important;
+  color:#9fd3f7!important;
+  border-color:#345a78!important;
+}
+.ami-dark .subscriber-welcome-card{background:#102235!important;color:#e7eff8!important;border-color:#30485f!important}
+
+/* Toasts */
+.ami-dark .ami-toast{background:#102235!important;border-color:#35506a!important}
+.ami-dark .ami-toast strong{color:#edf5fb!important}
+.ami-dark .ami-toast span{color:#9fb2c6!important}
+
+/* Links and muted text */
+.ami-dark a{color:#7fc4f4!important}
+.ami-dark a:hover{color:#b9e0ff!important}
+.ami-dark .muted,
+.ami-dark .text-muted,
+.ami-dark small{color:#9aabbd!important}
+
+/* Footer */
+.ami-dark .ami-footer,
+.ami-dark footer{background:#07111d!important;color:#9aabbd!important;border-color:#22384c!important}
+.ami-dark .ami-footer-links a{color:#9fb7ca!important}
+
+/* Avoid native browser forced-light appearance inside dark mode */
+.ami-dark,
+.ami-dark *{
+  scrollbar-color:#2b465d #091522;
+}

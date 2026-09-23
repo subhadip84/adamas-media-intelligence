@@ -1,0 +1,339 @@
+
+/* =========================================================
+   V4 FINAL POLISH — NAVIGATION + COMPLETE DARK MODE
+   Additive overrides only; existing features/handlers preserved.
+========================================================= */
+
+/* ---------- Header / navigation spacing ---------- */
+.topbar{
+  min-height:82px!important;
+  height:auto!important;
+  padding:10px 42px!important;
+  gap:18px!important;
+}
+.navigation{
+  gap:6px!important;
+  margin-left:auto!important;
+  margin-right:18px!important;
+  flex:0 1 auto!important;
+  min-width:0!important;
+}
+.nav-link{
+  padding:12px 13px!important;
+  min-height:44px!important;
+  border-radius:10px!important;
+  gap:6px!important;
+  white-space:nowrap!important;
+  font-size:14px!important;
+}
+.nav-link.active::after{
+  left:10px!important;
+  right:10px!important;
+  bottom:5px!important;
+  height:3px!important;
+  border-radius:99px!important;
+}
+.header-actions{flex:0 0 auto!important;gap:8px!important}
+.brand{flex:0 0 auto!important;min-width:0!important}
+.brand-title{white-space:nowrap!important}
+
+/* ---------- Explicit light-mode controls ---------- */
+body:not(.ami-dark) input,
+body:not(.ami-dark) textarea,
+body:not(.ami-dark) select,
+body:not(.ami-dark) option{
+  color-scheme:light!important;
+}
+body:not(.ami-dark) .search-panel,
+body:not(.ami-dark) .search-panel input{
+  background:#fff!important;
+  color:#24384f!important;
+}
+body:not(.ami-dark) .search-panel input::placeholder{color:#7b8da1!important;opacity:1!important}
+
+/* ---------- Complete dark palette ---------- */
+html:has(body.ami-dark){color-scheme:dark!important;background:#08111d!important}
+body.ami-dark{
+  --bg:#08111d!important;
+  --white:#0f1d2c!important;
+  --text:#e7eff8!important;
+  --muted:#9aabbd!important;
+  --border:#294055!important;
+  --navy:#e6eef7!important;
+  --navy-dark:#f4f8fc!important;
+  background:#08111d!important;
+  color:#e7eff8!important;
+}
+
+/* Page surfaces */
+.ami-dark .topbar{
+  background:rgba(8,17,29,.96)!important;
+  border-bottom-color:#263c52!important;
+  box-shadow:0 8px 28px rgba(0,0,0,.28)!important;
+}
+.ami-dark .brand-title{color:#eef5fb!important}
+.ami-dark .brand-sub{color:#9fb2c6!important}
+.ami-dark .logo-box{box-shadow:0 5px 18px rgba(0,0,0,.28)!important}
+.ami-dark .nav-link{
+  color:#b9cadb!important;
+  background:transparent!important;
+}
+.ami-dark .nav-link:hover,
+.ami-dark .nav-link:focus-visible{
+  background:#142a40!important;
+  color:#ffffff!important;
+}
+.ami-dark .nav-link.active{
+  color:#ffffff!important;
+  background:#10243a!important;
+}
+.ami-dark .nav-link.active::after{background:#5aa9ee!important}
+.ami-dark .icon-button{color:#d8e5f0!important}
+.ami-dark .user-button{
+  background:#12263a!important;
+  border-color:#30475d!important;
+  color:#e7eff8!important;
+}
+.ami-dark .admin-button{box-shadow:0 7px 18px rgba(23,105,166,.28)!important}
+.ami-dark .ami-theme-toggle{
+  background:#12263a!important;
+  color:#ffd76a!important;
+  border-color:#30475d!important;
+}
+.ami-dark .ami-command-hint{background:#12263a!important;color:#9fb2c6!important;border-color:#30475d!important}
+
+/* Hero remains readable but its controls are fully themed */
+.ami-dark .hero{background-color:#091522!important}
+.ami-dark .hero .hero-description{color:#eef5fb!important}
+.ami-dark .search-panel{
+  background:#102235!important;
+  border-color:#3a526a!important;
+  box-shadow:0 18px 48px rgba(0,0,0,.42)!important;
+}
+.ami-dark .search-icon{color:#a9bfd3!important}
+.ami-dark .search-panel input{
+  background:#102235!important;
+  color:#f2f7fb!important;
+  caret-color:#6db7f3!important;
+  color-scheme:dark!important;
+}
+.ami-dark .search-panel input::placeholder{color:#8fa5b9!important;opacity:1!important}
+.ami-dark .search-panel:focus-within{
+  box-shadow:0 0 0 4px rgba(83,166,231,.24),0 18px 48px rgba(0,0,0,.44)!important;
+}
+.ami-dark .search-button{box-shadow:0 8px 22px rgba(0,0,0,.30)!important}
+.ami-dark .search-suggestions,
+.ami-dark .search-suggestion{background:#102235!important;color:#edf5fb!important;border-color:#30485f!important}
+.ami-dark .search-suggestion:hover,
+.ami-dark .search-suggestion.active{background:#18344d!important;color:#fff!important}
+
+/* Main workspace */
+.ami-dark .main-layout,
+.ami-dark .content-area,
+.ami-dark .results-area,
+.ami-dark .results-container,
+.ami-dark .page-section,
+.ami-dark .info-page,
+.ami-dark .contact-page,
+.ami-dark .about-page{
+  color:#e7eff8!important;
+}
+.ami-dark .filter-panel,
+.ami-dark .sidebar-card,
+.ami-dark .article-card,
+.ami-dark .contact-card,
+.ami-dark .about-metric,
+.ami-dark .ami-kpi,
+.ami-dark .ami-trend-inner,
+.ami-dark .ami-coverage-card,
+.ami-dark .source-card,
+.ami-dark .stats-card{
+  background:#0e1d2c!important;
+  border-color:#294055!important;
+  color:#dce8f3!important;
+}
+.ami-dark .results-header h3,
+.ami-dark .filter-title,
+.ami-dark .sidebar-title,
+.ami-dark .article-title,
+.ami-dark .source-name,
+.ami-dark .card-title,
+.ami-dark h1,.ami-dark h2,.ami-dark h3,.ami-dark h4{
+  color:#edf5fb!important;
+}
+.ami-dark .article-summary,
+.ami-dark .article-footer,
+.ami-dark .ami-kpi-label,
+.ami-dark .ami-kpi-meta,
+.ami-dark .muted,
+.ami-dark .text-muted,
+.ami-dark .sidebar-description,
+.ami-dark .source-meta,
+.ami-dark small{
+  color:#9aabbd!important;
+}
+
+/* Forms — prevents black patches and unreadable controls */
+.ami-dark input,
+.ami-dark textarea,
+.ami-dark select,
+.ami-dark .filter-select,
+.ami-dark .sort-select,
+.ami-dark .mi-input,
+.ami-dark .login-input,
+.ami-dark .form-control,
+.ami-dark .form-select{
+  background:#0d1b2a!important;
+  color:#edf5fb!important;
+  border-color:#30485f!important;
+  color-scheme:dark!important;
+  caret-color:#7fc2f4!important;
+}
+.ami-dark input::placeholder,
+.ami-dark textarea::placeholder{color:#8197aa!important;opacity:1!important}
+.ami-dark select option{background:#0d1b2a!important;color:#edf5fb!important}
+.ami-dark input:focus,
+.ami-dark textarea:focus,
+.ami-dark select:focus{
+  border-color:#4f9ed6!important;
+  outline:none!important;
+  box-shadow:0 0 0 3px rgba(79,158,214,.18)!important;
+}
+.ami-dark input[type="checkbox"],
+.ami-dark input[type="radio"]{accent-color:#4b9ddd!important}
+
+/* Buttons */
+.ami-dark button:not(.nav-link):not(.admin-button):not(.user-button):not(.icon-button):not(.ami-theme-toggle){
+  color:#e7eff8;
+}
+.ami-dark .table-action,
+.ami-dark .reset-filter,
+.ami-dark .save-search-top,
+.ami-dark .mi-btn,
+.ami-dark .secondary-button,
+.ami-dark .outline-button{
+  background:#12263a!important;
+  color:#dcebf7!important;
+  border-color:#365069!important;
+}
+.ami-dark .table-action:hover,
+.ami-dark .reset-filter:hover,
+.ami-dark .save-search-top:hover,
+.ami-dark .mi-btn:hover{
+  background:#18344d!important;
+  border-color:#4d7da3!important;
+}
+.ami-dark .table-action.primary,
+.ami-dark .mi-btn.primary,
+.ami-dark .primary-button{background:#1769a6!important;color:#fff!important;border-color:#1769a6!important}
+.ami-dark .saved-search-active{background:#163a58!important;color:#8ed0ff!important;border-color:#4c9bd1!important}
+
+/* Tables — Source Management + RSS Feed Management + all admin tables */
+.ami-dark table,
+.ami-dark .data-table,
+.ami-dark .management-table{
+  background:#0d1b2a!important;
+  color:#dce8f3!important;
+  border-color:#294055!important;
+}
+.ami-dark table thead,
+.ami-dark .table-head,
+.ami-dark .management-table thead{background:#13283d!important;color:#dce8f3!important}
+.ami-dark table th{color:#dce8f3!important;border-color:#294055!important}
+.ami-dark table td{color:#c7d6e4!important;border-color:#263d52!important;background:#0d1b2a!important}
+.ami-dark table tbody tr:hover td{background:#12283d!important}
+.ami-dark .table-wrap{background:#0d1b2a!important;border-color:#294055!important}
+
+/* Intelligence hub / modal surfaces */
+.ami-dark .mi-hub{background:rgba(2,10,18,.82)!important}
+.ami-dark .mi-shell{background:#0b1724!important;color:#dce8f3!important}
+.ami-dark .mi-head{background:linear-gradient(135deg,#0d3154,#155d91)!important}
+.ami-dark .mi-card,
+.ami-dark .mi-item{background:#102235!important;border-color:#29465e!important;color:#dce8f3!important}
+.ami-dark .mi-card h3,
+.ami-dark .mi-section-title h2,
+.ami-dark .mi-item strong{color:#edf5fb!important}
+.ami-dark .mi-muted,.ami-dark .mi-status,.ami-dark .mi-small{color:#94a9bc!important}
+.ami-dark .mi-bar{background:#20364a!important}
+.ami-dark .mi-input{background:#0d1b2a!important;color:#edf5fb!important}
+.ami-dark .modal-box,
+.ami-dark .modal-content,
+.ami-dark .dialog-box,
+.ami-dark .app-modal{
+  background:#102235!important;
+  color:#e7eff8!important;
+  border-color:#30485f!important;
+}
+.ami-dark .modal-box h1,.ami-dark .modal-box h2,.ami-dark .modal-box h3,
+.ami-dark .modal-content h1,.ami-dark .modal-content h2,.ami-dark .modal-content h3{color:#edf5fb!important}
+
+/* Toasts */
+.ami-dark .ami-toast{background:#102235!important;border-color:#35506a!important;box-shadow:0 16px 40px rgba(0,0,0,.36)!important}
+.ami-dark .ami-toast strong{color:#edf5fb!important}.ami-dark .ami-toast span{color:#9fb2c6!important}
+
+/* Command search */
+.ami-dark .ami-command-overlay{background:rgba(2,10,18,.72)!important}
+.ami-dark .ami-command-box{background:#102235!important;border-color:#30485f!important}
+.ami-dark .ami-command-box input{background:#102235!important;color:#edf5fb!important;border-color:#30485f!important}
+.ami-dark .ami-command-item{color:#b9cbdc!important}
+.ami-dark .ami-command-item:hover{background:#18344d!important;color:#fff!important}
+
+/* RSS discovery / status panels */
+.ami-dark .ami-region-grid .ami-region,
+.ami-dark .ami-region{background:#13283d!important;border-color:#29465e!important;color:#afc1d1!important}
+.ami-dark .ami-region b{color:#82c7f5!important}
+.ami-dark .ami-coverage-title{color:#a8bbcc!important}
+
+/* Footer */
+.ami-dark .ami-footer,
+.ami-dark footer{
+  background:#07111d!important;
+  color:#9aabbd!important;
+  border-color:#22384c!important;
+}
+.ami-dark .ami-footer strong,
+.ami-dark footer strong{color:#e2edf7!important}
+
+/* Scrollbars */
+.ami-dark ::-webkit-scrollbar{width:10px;height:10px}
+.ami-dark ::-webkit-scrollbar-track{background:#091522}
+.ami-dark ::-webkit-scrollbar-thumb{background:#2b465d;border-radius:99px;border:2px solid #091522}
+.ami-dark ::-webkit-scrollbar-thumb:hover{background:#41647f}
+
+/* Focus visibility */
+.nav-link:focus-visible,
+.ami-theme-toggle:focus-visible,
+.search-button:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible{
+  outline:3px solid rgba(64,153,220,.35)!important;
+  outline-offset:2px!important;
+}
+
+/* Responsive navigation */
+@media (max-width:1250px){
+  .topbar{padding-left:24px!important;padding-right:24px!important}
+  .brand-title{font-size:20px!important}
+  .brand-sub{font-size:9px!important}
+  .nav-link{padding-left:10px!important;padding-right:10px!important;font-size:13px!important}
+  .navigation{margin-right:8px!important}
+}
+@media (max-width:1080px){
+  .topbar{flex-wrap:wrap!important;padding-top:9px!important;padding-bottom:9px!important}
+  .navigation{order:3;width:100%;justify-content:center;margin:0!important;overflow-x:auto;padding:3px 0!important}
+  .header-actions{margin-left:auto!important}
+}
+@media (max-width:620px){
+  .topbar{padding:8px 14px!important}
+  .logo-box{width:52px!important;height:48px!important}
+  .brand-title{font-size:16px!important}
+  .brand-sub{font-size:7px!important;letter-spacing:.05em!important}
+  .navigation{justify-content:flex-start!important}
+  .nav-link{font-size:12px!important;padding:9px 10px!important;min-height:40px!important}
+  .header-actions{gap:5px!important}
+  .admin-button{padding:9px 12px!important}
+  .user-button{padding:8px 11px!important}
+}
+.ami-theme-toggle,#v5ThemeButton{display:none!important}

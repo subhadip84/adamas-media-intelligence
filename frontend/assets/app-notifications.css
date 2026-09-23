@@ -1,0 +1,98 @@
+
+/* =========================================================
+   V19 — PROFESSIONAL REAL-TIME NOTIFICATIONS
+========================================================= */
+.ami-notification-button{
+  position:relative!important;
+  z-index:2147483001!important;
+  width:42px!important;height:42px!important;
+  min-width:42px!important;min-height:42px!important;
+  flex:0 0 42px!important;
+  display:inline-flex!important;align-items:center!important;justify-content:center!important;
+  visibility:visible!important;opacity:1!important;overflow:visible!important;
+  border:1px solid rgba(21,91,181,.16)!important;
+  background:rgba(255,255,255,.92)!important;
+  color:#173d64!important;border-radius:12px!important;
+  cursor:pointer!important;
+}
+.ami-notification-button:hover{background:#eef6ff!important;border-color:#b9d5ef!important;transform:translateY(-1px)}
+.ami-notification-button:focus-visible{outline:3px solid rgba(21,91,181,.20)!important;outline-offset:2px}
+.ami-bell-wrap{position:relative!important;display:inline-flex!important;width:24px!important;height:24px!important;align-items:center!important;justify-content:center!important}
+.ami-bell-icon{width:22px!important;height:22px!important;fill:none!important;stroke:currentColor!important;stroke-width:1.8!important;stroke-linecap:round!important;stroke-linejoin:round!important;transform-origin:50% 12%!important;transition:transform .2s ease!important}
+.ami-notification-button:hover .ami-bell-icon{transform:translateY(-1px) scale(1.04)!important}
+.ami-notification-button.ami-has-unread .ami-bell-icon{animation:amiBellRing 1.8s ease-in-out infinite!important}
+.ami-notification-button.ami-has-unread::after{content:"";position:absolute;inset:3px;border-radius:50%;border:1px solid rgba(21,91,181,.18);animation:amiBellPulse 1.8s ease-out infinite;pointer-events:none}
+@keyframes amiBellRing{0%,100%{transform:rotate(0)}8%{transform:rotate(12deg)}16%{transform:rotate(-12deg)}24%{transform:rotate(9deg)}32%{transform:rotate(-7deg)}40%{transform:rotate(3deg)}48%{transform:rotate(0)}}
+@keyframes amiBellPulse{0%{transform:scale(.72);opacity:.75}70%{transform:scale(1.25);opacity:0}100%{opacity:0}}
+.ami-notification-badge{position:absolute!important;right:-7px!important;top:-7px!important;min-width:19px!important;height:19px!important;padding:0 5px!important;border-radius:999px!important;background:#d93434!important;color:#fff!important;font-size:10px!important;font-weight:800!important;line-height:19px!important;text-align:center!important;border:2px solid #fff!important;box-shadow:0 3px 8px rgba(0,0,0,.16)!important;z-index:3!important}
+
+/* Fixed overlay: never part of document flow. */
+.ami-notification-popover{
+  position:fixed!important;top:74px!important;right:28px!important;
+  width:min(430px,calc(100vw - 28px))!important;
+  max-height:min(620px,calc(100vh - 92px))!important;
+  display:flex!important;flex-direction:column!important;
+  margin:0!important;padding:0!important;
+  background:rgba(255,255,255,.98)!important;
+  border:1px solid #d8e4ef!important;border-radius:18px!important;
+  box-shadow:0 24px 65px rgba(15,42,70,.24),0 4px 18px rgba(15,42,70,.10)!important;
+  overflow:hidden!important;z-index:2147483000!important;
+  opacity:0!important;visibility:hidden!important;pointer-events:none!important;
+  transform:translateY(-10px) scale(.97)!important;transform-origin:top right!important;
+  transition:opacity .18s ease,transform .18s ease,visibility .18s ease!important;
+}
+.ami-notification-popover.show{
+  opacity:1!important;visibility:visible!important;pointer-events:auto!important;
+  transform:translateY(0) scale(1)!important;
+}
+.ami-notification-head{display:flex!important;justify-content:space-between!important;align-items:flex-start!important;gap:14px!important;padding:17px 18px 13px!important;border-bottom:1px solid #e7edf4!important;background:linear-gradient(180deg,#fff,#f9fbfd)!important}
+.ami-notification-title{font-size:17px!important;line-height:1.2!important;font-weight:800!important;color:#102a46!important}
+.ami-notification-sub{font-size:11px!important;color:#75869a!important;margin-top:4px!important}
+.ami-notification-head-actions{display:flex!important;align-items:center!important;gap:8px!important}
+.ami-notification-text-btn,.ami-notification-close,.ami-desktop-alert-btn{border:0!important;font-family:inherit!important;cursor:pointer!important}
+.ami-notification-text-btn{font-size:11px!important;font-weight:700!important;color:#155bb5!important;padding:6px 8px!important;border-radius:7px!important;background:#eef5fc!important;white-space:nowrap!important}
+.ami-notification-text-btn:hover{background:#e0edfa!important}
+.ami-notification-close{width:30px!important;height:30px!important;border-radius:9px!important;font-size:20px!important;line-height:28px!important;color:#687b8e!important;background:transparent!important}
+.ami-notification-close:hover{background:#edf3f8!important;color:#102a46!important}
+.ami-notification-tools{display:flex!important;align-items:center!important;justify-content:space-between!important;padding:9px 13px!important;border-bottom:1px solid #edf1f6!important;background:#f7fafc!important}
+.ami-desktop-alert-btn{font-size:11px!important;font-weight:700!important;color:#155bb5!important;padding:6px 9px!important;border-radius:8px!important;background:#eaf2fc!important}
+.ami-desktop-alert-btn:hover{background:#dceafd!important}
+/* Desktop alerts — compact professional on/off switch */
+.ami-desktop-toggle{appearance:none!important;border:0!important;font-family:inherit!important;cursor:pointer!important;display:inline-flex!important;align-items:center!important;gap:9px!important;padding:6px 9px!important;border-radius:9px!important;background:#eaf2fc!important;color:#155bb5!important;font-size:11px!important;font-weight:700!important;line-height:1!important;white-space:nowrap!important}
+.ami-desktop-toggle:hover{background:#dceafd!important}
+.ami-desktop-toggle:focus-visible{outline:2px solid rgba(21,91,181,.28)!important;outline-offset:2px!important}
+.ami-toggle-track{position:relative!important;width:32px!important;height:18px!important;border-radius:999px!important;background:#b8c6d4!important;display:inline-block!important;transition:background .18s ease!important;flex:0 0 32px!important}
+.ami-toggle-thumb{position:absolute!important;top:3px!important;left:3px!important;width:12px!important;height:12px!important;border-radius:50%!important;background:#fff!important;box-shadow:0 1px 3px rgba(16,42,70,.25)!important;transition:transform .18s ease!important}
+.ami-desktop-toggle.is-on .ami-toggle-track{background:#20a564!important}
+.ami-desktop-toggle.is-on .ami-toggle-thumb{transform:translateX(14px)!important}
+.ami-desktop-toggle.is-on{background:#e9f8f0!important;color:#168253!important}
+.ami-dark .ami-desktop-toggle{background:#173452!important;color:#9dccf4!important}.ami-dark .ami-desktop-toggle.is-on{background:#123b2b!important;color:#7de0ac!important}.ami-dark .ami-toggle-track{background:#52687d!important}.ami-dark .ami-desktop-toggle.is-on .ami-toggle-track{background:#20a564!important}
+.ami-live-status{font-size:11px!important;color:#178754!important;font-weight:700!important;display:flex!important;align-items:center!important;gap:6px!important}
+.ami-live-dot{width:7px!important;height:7px!important;border-radius:50%!important;background:#20a564!important;box-shadow:0 0 0 4px rgba(32,165,100,.10)!important;animation:amiLivePulse 1.5s ease-in-out infinite!important}
+@keyframes amiLivePulse{50%{box-shadow:0 0 0 6px rgba(32,165,100,0)}}
+.ami-notification-list{overflow:auto!important;padding:7px!important;min-height:70px!important}
+.ami-notification-empty{padding:36px 18px!important;text-align:center!important;color:#7b8a9c!important;font-size:12px!important}
+.ami-notification-item{display:flex!important;align-items:flex-start!important;gap:10px!important;padding:12px 10px!important;border-radius:12px!important;margin:2px 0!important;cursor:pointer!important;transition:background .15s ease,transform .15s ease!important}
+.ami-notification-item:hover{background:#f2f7fc!important;transform:translateX(1px)!important}
+.ami-notification-item.unread{background:#eef6ff!important}
+.ami-notification-item-icon{width:34px!important;height:34px!important;flex:0 0 34px!important;border-radius:10px!important;display:flex!important;align-items:center!important;justify-content:center!important;font-size:15px!important;background:#eaf2fc!important;color:#155bb5!important}
+.ami-notification-item.saved .ami-notification-item-icon{background:#fff5df!important;color:#a56b00!important}
+.ami-notification-item-body{min-width:0!important;flex:1!important}
+.ami-notification-item-title{font-size:12px!important;line-height:1.42!important;font-weight:750!important;color:#17314d!important;display:-webkit-box!important;-webkit-line-clamp:2!important;-webkit-box-orient:vertical!important;overflow:hidden!important}
+.ami-notification-item-meta{display:flex!important;gap:7px!important;align-items:center!important;flex-wrap:wrap!important;margin-top:5px!important;font-size:10px!important;color:#7c8c9e!important}
+.ami-notification-item-source{font-weight:700!important;color:#53708c!important}
+.ami-notification-new{font-size:9px!important;font-weight:800!important;color:#c83b3b!important}
+.ami-notification-toast{position:fixed!important;right:24px!important;bottom:24px!important;width:min(390px,calc(100vw - 28px))!important;padding:13px 15px!important;background:#102a46!important;color:#fff!important;border-radius:13px!important;box-shadow:0 16px 38px rgba(9,28,49,.28)!important;z-index:2147483005!important;display:flex!important;gap:10px!important;align-items:flex-start!important;animation:amiToastIn .24s ease!important}
+.ami-notification-toast strong{display:block!important;font-size:12px!important}.ami-notification-toast span{display:block!important;font-size:11px!important;line-height:1.4!important;color:#cfe0ef!important;margin-top:2px!important}
+@keyframes amiToastIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.ami-dark .ami-notification-button{background:rgba(16,34,54,.94)!important;color:#d9e8f7!important;border-color:#294158!important}
+.ami-dark .ami-notification-popover{background:#102236!important;border-color:#294158!important;box-shadow:0 24px 65px rgba(0,0,0,.42)!important}
+.ami-dark .ami-notification-head{border-color:#294158!important;background:linear-gradient(180deg,#102236,#0e1f31)!important}
+.ami-dark .ami-notification-title{color:#e6eef7!important}.ami-dark .ami-notification-sub,.ami-dark .ami-notification-item-meta{color:#91a7bc!important}
+.ami-dark .ami-notification-tools{background:#0d1d2d!important;border-color:#294158!important}.ami-dark .ami-notification-item-title{color:#e6eef7!important}.ami-dark .ami-notification-item:hover{background:#142a40!important}.ami-dark .ami-notification-item.unread{background:#15314b!important}.ami-dark .ami-notification-empty{color:#91a7bc!important}.ami-dark .ami-notification-badge{border-color:#102236!important}.ami-dark .ami-desktop-alert-btn{background:#173452!important;color:#9dccf4!important}.ami-dark .ami-notification-close{color:#91a7bc!important}
+@media(max-width:680px){
+  .ami-notification-popover{top:66px!important;right:10px!important;width:calc(100vw - 20px)!important;max-height:calc(100vh - 78px)!important;border-radius:15px!important}
+  .ami-notification-head{padding:15px 14px 12px!important}.ami-notification-tools{padding:8px 10px!important}.ami-notification-list{padding:6px!important}
+  .ami-notification-toast{right:10px!important;bottom:10px!important;width:calc(100vw - 20px)!important}
+}
+@media(prefers-reduced-motion:reduce){.ami-notification-button.ami-has-unread .ami-bell-icon,.ami-notification-button.ami-has-unread::after,.ami-live-dot{animation:none!important}.ami-notification-popover{transition:none!important}}
