@@ -3788,11 +3788,9 @@ def search(
     token_conditions = []
     retrieval_terms = set(tokens[:12])
 
-    # High-recall aliases are used only for candidate retrieval.
-    # The strict Python ranker below still decides whether the article qualifies.
-    for alias in _search_concept_aliases(q):
-        if len(alias) >= 3:
-            retrieval_terms.add(alias)
+    # Concept aliases are evaluated by the Python ranker below.
+    # Keeping them out of the normal SQL OR tree avoids expensive ILIKE predicates.
+    # Entity-specific searches below retain their dedicated broad retrieval.
 
     # Binglish/Bengali variants increase recall at SQL stage; the strict ranker
     # above decides whether the candidate is genuinely relevant.
