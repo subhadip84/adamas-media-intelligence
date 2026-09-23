@@ -3907,12 +3907,19 @@ def search(
         if category_conditions:
             search_conditions.append(or_(*category_conditions))
 
+    _timing_total_start = time.perf_counter()
+    _timing_sql_start = time.perf_counter()
+
     rows = db.execute(
         select(Article, Source)
         .join(Source, Article.source_id == Source.id)
         .where(*search_conditions)
         .limit(2000)
     ).all()
+
+    _timing_sql_ms = (time.perf_counter() - _timing_sql_start) * 1000
+
+    _timing_filter_start = time.perf_counter()
 
     # Campus-aware hard gate. SQL token matching intentionally remains broad
     # for performance, but an IIT campus identifier must resolve to the same
@@ -3928,8 +3935,12 @@ def search(
                 filtered_rows.append((article, source_row))
         rows = filtered_rows
 
+    _timing_filter_ms = (time.perf_counter() - _timing_filter_start) * 1000
+
     # Prepare query-only ranking signals once and reuse them for every article.
     search_context = _prepare_search_context(q)
+
+    _timing_rank_start = time.perf_counter()
 
     ranked_rows = [
         (
@@ -3944,6 +3955,10 @@ def search(
         )
         for article, source_row in rows
     ]
+
+    _timing_rank_ms = (time.perf_counter() - _timing_rank_start) * 1000
+
+    _timing_postrank_start = time.perf_counter()
 
     ranked_rows.sort(
         key=lambda item: (
@@ -3976,6 +3991,8 @@ def search(
         deduped_rows.append(item)
 
     ranked_rows = deduped_rows[:50]
+
+    _timing_postrank_ms = (time.perf_counter() - _timing_postrank_start) * 1000
 
     # Instant lexical / Binglish search only. No AI or external inference is
     # involved in the search critical path.
@@ -4010,7 +4027,11 @@ def search(
         if result_count > 0 and not is_subscriber:
             usage.searches_used += 1
 
+    _timing_commit_start = time.perf_counter()
+
     db.commit()
+
+    _timing_commit_ms = (time.perf_counter() - _timing_commit_start) * 1000
 
     remaining = max(
         0,
@@ -4019,6 +4040,17 @@ def search(
 
     return {
         "status": "success",
+        "_debug_timing": {
+            "sql_ms": round(_timing_sql_ms, 2),
+            "entity_filter_ms": round(_timing_filter_ms, 2),
+            "ranking_ms": round(_timing_rank_ms, 2),
+            "postrank_ms": round(_timing_postrank_ms, 2),
+            "commit_ms": round(_timing_commit_ms, 2),
+            "total_ms": round(
+                (time.perf_counter() - _timing_total_start) * 1000,
+                2,
+            ),
+        },
         "query": q,
         "count": result_count,
         "free_limit": get_free_search_limit(db),
