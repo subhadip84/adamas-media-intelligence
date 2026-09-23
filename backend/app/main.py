@@ -1,4 +1,4 @@
-import time
+﻿import time
 import os
 import csv
 import hashlib
@@ -222,7 +222,7 @@ def _epaper_candidate_score(url, label=""):
         score += 3
     if re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", u):
         score += 2
-    if any(token in t for token in ("edition", "e-paper", "epaper", "newspaper", "आज का", "संस्करण")):
+    if any(token in t for token in ("edition", "e-paper", "epaper", "newspaper", "αñåαñ£ αñòαñ╛", "αñ╕αñéαñ╕αÑìαñòαñ░αñú")):
         score += 3
     if any(token in u for token in ("login", "signin", "sign-in", "subscribe", "subscription", "contact-us", "terms", "privacy")):
         score -= 4
@@ -2757,46 +2757,46 @@ def _token_present(token: str, text: str) -> bool:
 # Lets users search Bengali news using Latin/English keyboard spelling:
 # "ami tumi bhat khabo", "patropatri", "chele meye", etc.
 _BENGLISH_PHRASE_ALIASES = {
-    "ami":["আমি"], "aami":["আমি"], "amra":["আমরা"],
-    "tumi":["তুমি"], "tomra":["তোমরা"], "apni":["আপনি"],
-    "bhat":["ভাত"], "bhaat":["ভাত"],
-    "khabo":["খাবো","খাব"], "khab":["খাব"], "khao":["খাও"],
-    "khabe":["খাবে"], "kheye":["খেয়ে","খেয়ে"],
-    "patropatri":["পাত্রপাত্রী"], "patro patri":["পাত্রপাত্রী"],
-    "patro":["পাত্র"], "patri":["পাত্রী"],
-    "chele":["ছেলে"], "meye":["মেয়ে","মেয়ে"],
-    "chele meye":["ছেলে মেয়ে","ছেলে মেয়ে"],
-    "chelemeye":["ছেলেমেয়ে","ছেলেমেয়ে"],
-    "biye":["বিয়ে","বিয়ে"], "bibaho":["বিবাহ"],
-    "bhalobasha":["ভালোবাসা"], "bhalobasa":["ভালোবাসা"],
-    "poribar":["পরিবার"], "shikkha":["শিক্ষা"],
-    "school":["স্কুল"], "college":["কলেজ"],
-    "biswobidyaloy":["বিশ্ববিদ্যালয়","বিশ্ববিদ্যালয়"],
-    "bishwabidyaloy":["বিশ্ববিদ্যালয়","বিশ্ববিদ্যালয়"],
-    "chakri":["চাকরি"], "kaj":["কাজ"], "bari":["বাড়ি","বাড়ি"],
-    "ghor":["ঘর"], "manush":["মানুষ"], "lok":["লোক"],
-    "meyeder":["মেয়েদের","মেয়েদের"], "cheleder":["ছেলেদের"],
-    "kothay":["কোথায়","কোথায়"], "ki":["কি"], "keno":["কেন"],
-    "kobe":["কবে"], "kemon":["কেমন"], "kivabe":["কিভাবে","কীভাবে"],
-    "ki bhabe":["কি ভাবে","কীভাবে"], "khobor":["খবর"],
-    "aj":["আজ"], "aaj":["আজ"], "kal":["কাল"],
-    "bangla":["বাংলা"], "banglay":["বাংলায়","বাংলায়"],
-    "kolkata":["কলকাতা"], "west bengal":["পশ্চিমবঙ্গ"],
+    "ami":["αªåαª«αª┐"], "aami":["αªåαª«αª┐"], "amra":["αªåαª«αª░αª╛"],
+    "tumi":["αªñαºüαª«αª┐"], "tomra":["αªñαºïαª«αª░αª╛"], "apni":["αªåαª¬αª¿αª┐"],
+    "bhat":["αª¡αª╛αªñ"], "bhaat":["αª¡αª╛αªñ"],
+    "khabo":["αªûαª╛αª¼αºï","αªûαª╛αª¼"], "khab":["αªûαª╛αª¼"], "khao":["αªûαª╛αªô"],
+    "khabe":["αªûαª╛αª¼αºç"], "kheye":["αªûαºçαºƒαºç","αªûαºçαª»αª╝αºç"],
+    "patropatri":["αª¬αª╛αªñαºìαª░αª¬αª╛αªñαºìαª░αºÇ"], "patro patri":["αª¬αª╛αªñαºìαª░αª¬αª╛αªñαºìαª░αºÇ"],
+    "patro":["αª¬αª╛αªñαºìαª░"], "patri":["αª¬αª╛αªñαºìαª░αºÇ"],
+    "chele":["αª¢αºçαª▓αºç"], "meye":["αª«αºçαºƒαºç","αª«αºçαª»αª╝αºç"],
+    "chele meye":["αª¢αºçαª▓αºç αª«αºçαºƒαºç","αª¢αºçαª▓αºç αª«αºçαª»αª╝αºç"],
+    "chelemeye":["αª¢αºçαª▓αºçαª«αºçαºƒαºç","αª¢αºçαª▓αºçαª«αºçαª»αª╝αºç"],
+    "biye":["αª¼αª┐αºƒαºç","αª¼αª┐αª»αª╝αºç"], "bibaho":["αª¼αª┐αª¼αª╛αª╣"],
+    "bhalobasha":["αª¡αª╛αª▓αºïαª¼αª╛αª╕αª╛"], "bhalobasa":["αª¡αª╛αª▓αºïαª¼αª╛αª╕αª╛"],
+    "poribar":["αª¬αª░αª┐αª¼αª╛αª░"], "shikkha":["αª╢αª┐αªòαºìαª╖αª╛"],
+    "school":["αª╕αºìαªòαºüαª▓"], "college":["αªòαª▓αºçαª£"],
+    "biswobidyaloy":["αª¼αª┐αª╢αºìαª¼αª¼αª┐αªªαºìαª»αª╛αª▓αºƒ","αª¼αª┐αª╢αºìαª¼αª¼αª┐αªªαºìαª»αª╛αª▓αª»αª╝"],
+    "bishwabidyaloy":["αª¼αª┐αª╢αºìαª¼αª¼αª┐αªªαºìαª»αª╛αª▓αºƒ","αª¼αª┐αª╢αºìαª¼αª¼αª┐αªªαºìαª»αª╛αª▓αª»αª╝"],
+    "chakri":["αªÜαª╛αªòαª░αª┐"], "kaj":["αªòαª╛αª£"], "bari":["αª¼αª╛αº£αª┐","αª¼αª╛αªíαª╝αª┐"],
+    "ghor":["αªÿαª░"], "manush":["αª«αª╛αª¿αºüαª╖"], "lok":["αª▓αºïαªò"],
+    "meyeder":["αª«αºçαºƒαºçαªªαºçαª░","αª«αºçαª»αª╝αºçαªªαºçαª░"], "cheleder":["αª¢αºçαª▓αºçαªªαºçαª░"],
+    "kothay":["αªòαºïαªÑαª╛αºƒ","αªòαºïαªÑαª╛αª»αª╝"], "ki":["αªòαª┐"], "keno":["αªòαºçαª¿"],
+    "kobe":["αªòαª¼αºç"], "kemon":["αªòαºçαª«αª¿"], "kivabe":["αªòαª┐αª¡αª╛αª¼αºç","αªòαºÇαª¡αª╛αª¼αºç"],
+    "ki bhabe":["αªòαª┐ αª¡αª╛αª¼αºç","αªòαºÇαª¡αª╛αª¼αºç"], "khobor":["αªûαª¼αª░"],
+    "aj":["αªåαª£"], "aaj":["αªåαª£"], "kal":["αªòαª╛αª▓"],
+    "bangla":["αª¼αª╛αªéαª▓αª╛"], "banglay":["αª¼αª╛αªéαª▓αª╛αºƒ","αª¼αª╛αªéαª▓αª╛αª»αª╝"],
+    "kolkata":["αªòαª▓αªòαª╛αªñαª╛"], "west bengal":["αª¬αª╢αºìαªÜαª┐αª«αª¼αªÖαºìαªù"],
 }
 
 _BENGLISH_MULTI = [
-    ("ksh","ক্ষ"),("ng","ং"),("nj","ঞ্জ"),("nc","ঞ্চ"),("chh","ছ"),
-    ("jh","ঝ"),("kh","খ"),("gh","ঘ"),("th","থ"),("dh","ধ"),
-    ("ph","ফ"),("bh","ভ"),("sh","শ"),("ch","চ"),("tr","ত্র"),
-    ("dr","দ্র"),("pr","প্র"),("br","ব্র"),("kr","ক্র"),("gr","গ্র"),
-    ("st","স্ট"),("sk","স্ক"),("sp","স্প"),("sm","স্ম"),("sw","স্ব"),
+    ("ksh","αªòαºìαª╖"),("ng","αªé"),("nj","αª₧αºìαª£"),("nc","αª₧αºìαªÜ"),("chh","αª¢"),
+    ("jh","αª¥"),("kh","αªû"),("gh","αªÿ"),("th","αªÑ"),("dh","αªº"),
+    ("ph","αª½"),("bh","αª¡"),("sh","αª╢"),("ch","αªÜ"),("tr","αªñαºìαª░"),
+    ("dr","αªªαºìαª░"),("pr","αª¬αºìαª░"),("br","αª¼αºìαª░"),("kr","αªòαºìαª░"),("gr","αªùαºìαª░"),
+    ("st","αª╕αºìαªƒ"),("sk","αª╕αºìαªò"),("sp","αª╕αºìαª¬"),("sm","αª╕αºìαª«"),("sw","αª╕αºìαª¼"),
 ]
 _BENGLISH_C = {
-    "k":"ক","g":"গ","c":"ক","j":"জ","t":"ত","d":"দ","n":"ন",
-    "p":"প","b":"ব","m":"ম","y":"য","r":"র","l":"ল","s":"স",
-    "h":"হ","v":"ভ","w":"ও","f":"ফ","q":"ক","x":"ক্স","z":"জ",
+    "k":"αªò","g":"αªù","c":"αªò","j":"αª£","t":"αªñ","d":"αªª","n":"αª¿",
+    "p":"αª¬","b":"αª¼","m":"αª«","y":"αª»","r":"αª░","l":"αª▓","s":"αª╕",
+    "h":"αª╣","v":"αª¡","w":"αªô","f":"αª½","q":"αªò","x":"αªòαºìαª╕","z":"αª£",
 }
-_BENGLISH_V = {"a":"া","i":"ি","u":"ু","e":"ে","o":"ো"}
+_BENGLISH_V = {"a":"αª╛","i":"αª┐","u":"αºü","e":"αºç","o":"αºï"}
 
 def _benglish_phonetic_word(word: str) -> str:
     w = re.sub(r"[^a-z]", "", str(word or "").lower())
@@ -2812,14 +2812,14 @@ def _benglish_phonetic_word(word: str) -> str:
         if hit:
             out.append(hit[1]); i+=len(hit[0]); pending=True; continue
         if w.startswith("aa",i):
-            out.append("া" if pending else "আ"); i+=2; pending=False; continue
+            out.append("αª╛" if pending else "αªå"); i+=2; pending=False; continue
         if w.startswith(("ee","ii"),i):
-            out.append("ী" if pending else "ঈ"); i+=2; pending=False; continue
+            out.append("αºÇ" if pending else "αªê"); i+=2; pending=False; continue
         if w.startswith(("oo","uu"),i):
-            out.append("ূ" if pending else "ঊ"); i+=2; pending=False; continue
+            out.append("αºé" if pending else "αªè"); i+=2; pending=False; continue
         ch=w[i]
         if ch in _BENGLISH_V:
-            out.append(_BENGLISH_V[ch] if pending else {"a":"অ","i":"ই","u":"উ","e":"এ","o":"ও"}[ch])
+            out.append(_BENGLISH_V[ch] if pending else {"a":"αªà","i":"αªç","u":"αªë","e":"αªÅ","o":"αªô"}[ch])
             pending=False
         elif ch in _BENGLISH_C:
             out.append(_BENGLISH_C[ch]); pending=True
@@ -3347,7 +3347,7 @@ def _add_suggestion(bucket: dict, text: str, score: float, kind: str = "query", 
     cleaned = _clean_search_text(text)
     if not cleaned:
         return
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -ΓÇôΓÇö")
     if len(cleaned) < 2 or len(cleaned) > 140:
         return
     key = _normalise_search(cleaned)
@@ -3907,19 +3907,12 @@ def search(
         if category_conditions:
             search_conditions.append(or_(*category_conditions))
 
-    _timing_total_start = time.perf_counter()
-    _timing_sql_start = time.perf_counter()
-
     rows = db.execute(
         select(Article, Source)
         .join(Source, Article.source_id == Source.id)
         .where(*search_conditions)
         .limit(2000)
     ).all()
-
-    _timing_sql_ms = (time.perf_counter() - _timing_sql_start) * 1000
-
-    _timing_filter_start = time.perf_counter()
 
     # Campus-aware hard gate. SQL token matching intentionally remains broad
     # for performance, but an IIT campus identifier must resolve to the same
@@ -3935,12 +3928,8 @@ def search(
                 filtered_rows.append((article, source_row))
         rows = filtered_rows
 
-    _timing_filter_ms = (time.perf_counter() - _timing_filter_start) * 1000
-
     # Prepare query-only ranking signals once and reuse them for every article.
     search_context = _prepare_search_context(q)
-
-    _timing_rank_start = time.perf_counter()
 
     ranked_rows = [
         (
@@ -3955,10 +3944,6 @@ def search(
         )
         for article, source_row in rows
     ]
-
-    _timing_rank_ms = (time.perf_counter() - _timing_rank_start) * 1000
-
-    _timing_postrank_start = time.perf_counter()
 
     ranked_rows.sort(
         key=lambda item: (
@@ -3991,8 +3976,6 @@ def search(
         deduped_rows.append(item)
 
     ranked_rows = deduped_rows[:50]
-
-    _timing_postrank_ms = (time.perf_counter() - _timing_postrank_start) * 1000
 
     # Instant lexical / Binglish search only. No AI or external inference is
     # involved in the search critical path.
@@ -4027,11 +4010,7 @@ def search(
         if result_count > 0 and not is_subscriber:
             usage.searches_used += 1
 
-    _timing_commit_start = time.perf_counter()
-
     db.commit()
-
-    _timing_commit_ms = (time.perf_counter() - _timing_commit_start) * 1000
 
     remaining = max(
         0,
@@ -4040,17 +4019,6 @@ def search(
 
     return {
         "status": "success",
-        "_debug_timing": {
-            "sql_ms": round(_timing_sql_ms, 2),
-            "entity_filter_ms": round(_timing_filter_ms, 2),
-            "ranking_ms": round(_timing_rank_ms, 2),
-            "postrank_ms": round(_timing_postrank_ms, 2),
-            "commit_ms": round(_timing_commit_ms, 2),
-            "total_ms": round(
-                (time.perf_counter() - _timing_total_start) * 1000,
-                2,
-            ),
-        },
         "query": q,
         "count": result_count,
         "free_limit": get_free_search_limit(db),
@@ -4060,9 +4028,9 @@ def search(
         ),
         "subscribed": is_subscriber,
         "search_language_mode": (
-            "Binglish → Bengali"
+            "Binglish ΓåÆ Bengali"
             if _benglish_search_variants(q)
-            else ("Bengali" if re.search(r"[ঀ-৿]", q) else "English / Mixed")
+            else ("Bengali" if re.search(r"[αªÇ-αº┐]", q) else "English / Mixed")
         ),
         "search_variants": _benglish_search_variants(q)[:8],
         "filters": {
@@ -4633,13 +4601,13 @@ def generate_briefing(x_user_key:str=Header(alias="X-User-Key"),x_auth_token:Opt
     cutoff=datetime.now(timezone.utc)-timedelta(hours=24)
     rows=db.execute(select(Article,Source).join(Source,Article.source_id==Source.id).where(Article.published_at>=cutoff).order_by(Article.published_at.desc()).limit(25)).all()
     lines=[]
-    for i,(a,sr) in enumerate(rows[:10],1): lines.append(f"{i}. {a.title} — {sr.name}. {_intel_summary(a)}")
+    for i,(a,sr) in enumerate(rows[:10],1): lines.append(f"{i}. {a.title} ΓÇö {sr.name}. {_intel_summary(a)}")
     body="\n".join(lines) if lines else "No new indexed articles were found in the last 24 hours."
     b=Briefing(user_key=user,briefing_date=date_key,title="Daily Media Intelligence Briefing",body=body,article_count=len(rows)); db.add(b); db.commit(); db.refresh(b); return {"id":b.id,"title":b.title,"body":b.body,"article_count":b.article_count,"generated_at":b.generated_at}
 
 
 # =========================================================
-# ADMIN — ePAPER AUTO-DISCOVERY
+# ADMIN ΓÇö ePAPER AUTO-DISCOVERY
 # =========================================================
 
 @app.get("/api/admin/epaper/publishers")
@@ -6406,7 +6374,7 @@ def get_feed(
     }
 
 # =========================================================
-# ADMIN — AUTOMATIC GLOBAL RSS DISCOVERY
+# ADMIN ΓÇö AUTOMATIC GLOBAL RSS DISCOVERY
 # =========================================================
 
 @app.get("/api/admin/settings/auto-rss-discovery")
