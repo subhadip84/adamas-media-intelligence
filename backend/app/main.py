@@ -3792,11 +3792,9 @@ def search(
     # Keeping them out of the normal SQL OR tree avoids expensive ILIKE predicates.
     # Entity-specific searches below retain their dedicated broad retrieval.
 
-    # Binglish/Bengali variants increase recall at SQL stage; the strict ranker
-    # above decides whether the candidate is genuinely relevant.
-    for bengali_variant in _benglish_search_variants(q):
-        if len(bengali_variant) >= 2:
-            retrieval_terms.add(bengali_variant)
+    # Bengali/Binglish variants are handled by the Python ranker.
+    # Keeping them out of the normal SQL OR tree avoids expensive ILIKE predicates.
+    # Dedicated entity retrieval below remains unchanged.
 
     for token in retrieval_terms:
         variants = _token_variants(token)
