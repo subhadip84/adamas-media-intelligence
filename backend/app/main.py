@@ -1947,6 +1947,237 @@ def startup():
 # HEALTH CHECK
 # =========================================================
 
+
+# TEMP_DB_DIAGNOSTIC_ENDPOINT
+@app.get("/api/admin/diagnostics/db-query-plan")
+def diagnostic_db_query_plan(
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    TEMPORARY production PostgreSQL diagnostic.
+    This endpoint is intentionally admin protected and must be removed
+    after database query-plan analysis.
+    """
+
+    import time
+
+    result = {
+        "status": "ok",
+        "diagnostic": "temporary-db-query-plan",
+        "database": {},
+        "extensions": [],
+        "indexes": [],
+        "plans": {},
+    }
+
+    # ----------------------------------------------
+    # PostgreSQL version
+    # ----------------------------------------------
+    version = db.connection().exec_driver_sql(
+        "SELECT version()"
+    ).scalar()
+
+    result["database"]["version"] = version
+
+    # ----------------------------------------------
+    # PostgreSQL database/server settings
+    # ----------------------------------------------
+    settings = db.connection().exec_driver_sql(
+        """
+        SELECT
+            current_database(),
+            current_user,
+            current_setting('server_version'),
+            current_setting('shared_buffers'),
+            current_setting('work_mem')
+        """
+    ).first()
+
+    if settings:
+        result["database"]["database_name"] = settings[0]
+        result["database"]["user"] = settings[1]
+        result["database"]["server_version"] = settings[2]
+        result["database"]["shared_buffers"] = settings[3]
+        result["database"]["work_mem"] = settings[4]
+
+    # ----------------------------------------------
+    # Extensions
+    # ----------------------------------------------
+    ext_rows = db.connection().exec_driver_sql(
+        """
+        SELECT extname, extversion
+        FROM pg_extension
+        WHERE extname IN ('pg_trgm')
+        ORDER BY extname
+        """
+    ).all()
+
+    result["extensions"] = [
+        {
+            "name": row[0],
+            "version": row[1],
+        }
+        for row in ext_rows
+    ]
+
+    # ----------------------------------------------
+    # Article/source indexes
+    # ----------------------------------------------
+    index_rows = db.connection().exec_driver_sql(
+        """
+        SELECT
+            schemaname,
+            tablename,
+            indexname,
+            indexdef
+        FROM pg_indexes
+        WHERE tablename IN ('articles', 'sources')
+        ORDER BY tablename, indexname
+        """
+    ).all()
+
+    result["indexes"] = [
+        {
+            "schema": row[0],
+            "table": row[1],
+            "index": row[2],
+            "definition": row[3],
+        }
+        for row in index_rows
+    ]
+
+    # ----------------------------------------------
+    # Table sizes
+    # ----------------------------------------------
+    size_rows = db.connection().exec_driver_sql(
+        """
+        SELECT
+            relname,
+            pg_size_pretty(pg_total_relation_size(relid))
+        FROM pg_catalog.pg_statio_user_tables
+        WHERE relname IN ('articles', 'sources')
+        ORDER BY relname
+        """
+    ).all()
+
+    result["database"]["table_sizes"] = {
+        row[0]: row[1]
+        for row in size_rows
+    }
+
+    # ----------------------------------------------
+    # Row counts
+    # ----------------------------------------------
+    count_rows = db.connection().exec_driver_sql(
+        """
+        SELECT
+            (SELECT count(*) FROM articles),
+            (SELECT count(*) FROM sources)
+        """
+    ).first()
+
+    if count_rows:
+        result["database"]["article_count"] = count_rows[0]
+        result["database"]["source_count"] = count_rows[1]
+
+    # ----------------------------------------------
+    # PLAN 1:
+    # Exact representative production-style search
+    # ----------------------------------------------
+    sql1 = """
+    EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+    SELECT
+        a.id,
+        a.title,
+        a.summary,
+        a.category,
+        a.published_at,
+        s.name
+    FROM articles a
+    JOIN sources s
+        ON a.source_id = s.id
+    WHERE
+        a.published_at >= NOW() - INTERVAL '30 days'
+        AND (
+            a.title ILIKE '%University%'
+            OR a.summary ILIKE '%University%'
+            OR a.category ILIKE '%University%'
+            OR s.name ILIKE '%University%'
+        )
+    LIMIT 2000
+    """
+
+    started = time.perf_counter()
+
+    plan1 = db.connection().exec_driver_sql(sql1).all()
+
+    elapsed1 = (time.perf_counter() - started) * 1000
+
+    result["plans"]["university_30_days"] = {
+        "client_elapsed_ms": round(elapsed1, 2),
+        "sql": sql1.strip(),
+        "plan": [row[0] for row in plan1],
+    }
+
+    # ----------------------------------------------
+    # PLAN 2:
+    # Trigram-friendly title search
+    # ----------------------------------------------
+    sql2 = """
+    EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+    SELECT
+        a.id,
+        a.title
+    FROM articles a
+    WHERE
+        a.title ILIKE '%University%'
+    LIMIT 2000
+    """
+
+    started = time.perf_counter()
+
+    plan2 = db.connection().exec_driver_sql(sql2).all()
+
+    elapsed2 = (time.perf_counter() - started) * 1000
+
+    result["plans"]["title_trigram_test"] = {
+        "client_elapsed_ms": round(elapsed2, 2),
+        "sql": sql2.strip(),
+        "plan": [row[0] for row in plan2],
+    }
+
+    # ----------------------------------------------
+    # PLAN 3:
+    # Date + title search
+    # ----------------------------------------------
+    sql3 = """
+    EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+    SELECT
+        a.id,
+        a.title
+    FROM articles a
+    WHERE
+        a.published_at >= NOW() - INTERVAL '30 days'
+        AND a.title ILIKE '%University%'
+    LIMIT 2000
+    """
+
+    started = time.perf_counter()
+
+    plan3 = db.connection().exec_driver_sql(sql3).all()
+
+    elapsed3 = (time.perf_counter() - started) * 1000
+
+    result["plans"]["date_title_search"] = {
+        "client_elapsed_ms": round(elapsed3, 2),
+        "sql": sql3.strip(),
+        "plan": [row[0] for row in plan3],
+    }
+
+    return result
+
+
 @app.get("/health")
 def health():
 
