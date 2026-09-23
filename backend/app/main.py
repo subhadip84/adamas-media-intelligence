@@ -7,6 +7,7 @@ import hmac
 import calendar
 import re
 import difflib
+from functools import lru_cache
 import html as html_lib
 import json
 import asyncio
@@ -2595,6 +2596,7 @@ IIT_CAMPUS_ALIASES = {
 }
 
 
+@lru_cache(maxsize=512)
 def _iit_campus_codes(value: str) -> set[str]:
     """Return canonical IIT campus codes represented by a query or article text."""
     normalized = _normalise_search(value)
@@ -2917,6 +2919,34 @@ def _search_concept_aliases(query: str) -> set[str]:
     return aliases
 
 
+def _search_text_has_concept_prepared(
+    text_n: str,
+    compact_text: str,
+    words: set[str],
+    concept: str,
+) -> bool:
+    """Match a concept using already-prepared article text."""
+    concept_n = _normalise_search(concept)
+    if not text_n or not concept_n:
+        return False
+
+    if concept_n in text_n:
+        return True
+
+    compact_concept = _compact_search(concept)
+    if compact_concept and len(compact_concept) >= 3 and compact_concept in compact_text:
+        return True
+
+    tokens = [t for t in concept_n.split() if t not in SEARCH_STOP_WORDS]
+    if not tokens:
+        return False
+
+    return all(
+        bool(words.intersection(_token_variants(token)))
+        for token in tokens
+    )
+
+
 def _search_text_has_concept(text: str, concept: str) -> bool:
     """Match a concept by exact phrase, compact acronym, or token coverage."""
     text_n = _normalise_search(text)
@@ -2943,7 +2973,25 @@ def _search_text_has_concept(text: str, concept: str) -> bool:
     )
 
 
-def _search_match_profile(query: str, article: Article, source: Source) -> dict:
+def _prepare_search_context(query: str) -> dict:
+    """Precompute query-only search signals once per search request."""
+    return {
+        "q": _normalise_search(query),
+        "q_compact": _compact_search(query),
+        "q_tokens": _query_tokens(query),
+        "q_phrase": _normalise_search(query),
+        "aliases": _search_concept_aliases(query),
+        "benglish_variants": _benglish_search_variants(query),
+        "entity_codes": _search_entity_codes(query),
+    }
+
+
+def _search_match_profile(
+    query: str,
+    article: Article,
+    source: Source,
+    search_context: dict | None = None,
+) -> dict:
     """Produce explainable field-level relevance signals for one article."""
     title = _normalise_search(article.title)
     summary = _normalise_search(article.summary)
@@ -2952,10 +3000,14 @@ def _search_match_profile(query: str, article: Article, source: Source) -> dict:
     category = _normalise_search(article.category)
     source_name = _normalise_search(source.name)
 
-    q_tokens = _query_tokens(query)
-    q_phrase = _normalise_search(query)
-    aliases = _search_concept_aliases(query)
-    benglish_variants = _benglish_search_variants(query)
+    title_words = set(title.split())
+    summary_words = set(summary.split())
+
+    context = search_context or _prepare_search_context(query)
+    q_tokens = context["q_tokens"]
+    q_phrase = context["q_phrase"]
+    aliases = context["aliases"]
+    benglish_variants = context["benglish_variants"]
 
     title_hits = sum(1 for t in q_tokens if _token_present(t, title))
     summary_hits = sum(1 for t in q_tokens if _token_present(t, summary))
@@ -2966,11 +3018,23 @@ def _search_match_profile(query: str, article: Article, source: Source) -> dict:
     exact_summary = bool(q_phrase and q_phrase in summary)
 
     alias_title = any(
-        a != q_phrase and _search_text_has_concept(title, a)
+        a != q_phrase
+        and _search_text_has_concept_prepared(
+            title,
+            title_compact,
+            title_words,
+            a,
+        )
         for a in aliases
     )
     alias_summary = any(
-        a != q_phrase and _search_text_has_concept(summary, a)
+        a != q_phrase
+        and _search_text_has_concept_prepared(
+            summary,
+            summary_compact,
+            summary_words,
+            a,
+        )
         for a in aliases
     )
 
@@ -2983,10 +3047,34 @@ def _search_match_profile(query: str, article: Article, source: Source) -> dict:
         for v in benglish_variants
     )
     benglish_title_hits = max(
-        [sum(1 for v in benglish_variants if _search_text_has_concept(title, v)), 0]
+        [
+            sum(
+                1
+                for v in benglish_variants
+                if _search_text_has_concept_prepared(
+                    title,
+                    title_compact,
+                    title_words,
+                    v,
+                )
+            ),
+            0,
+        ]
     )
     benglish_summary_hits = max(
-        [sum(1 for v in benglish_variants if _search_text_has_concept(summary, v)), 0]
+        [
+            sum(
+                1
+                for v in benglish_variants
+                if _search_text_has_concept_prepared(
+                    summary,
+                    summary_compact,
+                    summary_words,
+                    v,
+                )
+            ),
+            0,
+        ]
     )
 
     return {
@@ -3014,6 +3102,7 @@ def _score_search_result(
     query: str,
     article: Article,
     source: Source,
+    search_context: dict | None = None,
 ) -> float:
     """
     Multi-signal relevance ranker.
@@ -3025,9 +3114,10 @@ def _score_search_result(
     Fuzzy matching is deliberately weak and only activates after meaningful
     lexical evidence exists, preventing unrelated articles from floating up.
     """
-    q = _normalise_search(query)
-    q_compact = _compact_search(query)
-    q_tokens = _query_tokens(query)
+    context = search_context or _prepare_search_context(query)
+    q = context["q"]
+    q_compact = context["q_compact"]
+    q_tokens = context["q_tokens"]
 
     title = _normalise_search(article.title)
     summary = _normalise_search(article.summary)
@@ -3037,7 +3127,9 @@ def _score_search_result(
     score = 0.0
 
     # HARD ENTITY IDENTITY GATE.
-    requested_entity_codes = _search_entity_codes(query)
+    requested_entity_codes = context.get("entity_codes")
+    if requested_entity_codes is None:
+        requested_entity_codes = _search_entity_codes(query)
     if requested_entity_codes:
         result_entity_codes = _search_entity_codes(
             f"{article.title or ''} {article.summary or ''}"
@@ -3046,7 +3138,12 @@ def _score_search_result(
             return -1.0
         score += 4000
 
-    profile = _search_match_profile(query, article, source)
+    profile = _search_match_profile(
+        query,
+        article,
+        source,
+        search_context=search_context,
+    )
 
     short_identifier = (
         len(q_tokens) >= 2
@@ -3821,7 +3918,7 @@ def search(
     # for performance, but an IIT campus identifier must resolve to the same
     # canonical campus before the article can be returned. This is what keeps
     # "IIT-B" from returning "IIT-M" simply because both contain "IIT".
-    requested_entity_codes = _search_entity_codes(q)
+    # Reuse the query-level entity codes already calculated above.
     if requested_entity_codes:
         filtered_rows = []
         for article, source_row in rows:
@@ -3831,9 +3928,17 @@ def search(
                 filtered_rows.append((article, source_row))
         rows = filtered_rows
 
+    # Prepare query-only ranking signals once and reuse them for every article.
+    search_context = _prepare_search_context(q)
+
     ranked_rows = [
         (
-            _score_search_result(q, article, source_row),
+            _score_search_result(
+                q,
+                article,
+                source_row,
+                search_context=search_context,
+            ),
             article,
             source_row,
         )
