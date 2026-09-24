@@ -408,9 +408,61 @@ function showSuggestions(items, query){
     });
 }
 
+/* Instant predictions (Google-style):
+   - every server answer is remembered in the browser, so typing the same
+     prefix again, or backspacing, shows predictions with no network wait;
+   - while the server is asked about a longer prefix, the predictions of the
+     previous prefix are filtered locally and shown immediately. */
+const suggestionCache = new Map();
+const SUGGESTION_CACHE_MAX = 300;
+let lastShownSuggestionKey = "";
+
+function suggestionKey(query){
+    return String(query || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function cachedSuggestions(query){
+    return suggestionCache.get(suggestionKey(query));
+}
+
+function rememberSuggestions(query, items){
+    const key = suggestionKey(query);
+    suggestionCache.delete(key);
+    suggestionCache.set(key, items);
+    if(suggestionCache.size > SUGGESTION_CACHE_MAX){
+        suggestionCache.delete(suggestionCache.keys().next().value);
+    }
+}
+
+function instantSuggestions(query){
+    const key = suggestionKey(query);
+    for(let len = key.length - 1; len >= 2; len--){
+        const previous = suggestionCache.get(key.slice(0, len));
+        if(previous){
+            return previous.filter(item => String(item).toLowerCase().includes(key));
+        }
+    }
+    return null;
+}
+
+function renderSuggestionsOnce(items, query){
+    // Avoid re-rendering (and losing the arrow-key highlight) when the same
+    // list for this query is already on screen.
+    const signature = suggestionKey(query) + "\u0000" + items.join("\u0001");
+    if(signature === lastShownSuggestionKey && suggestionBox.classList.contains("show")) return;
+    lastShownSuggestionKey = signature;
+    showSuggestions(items, query);
+}
+
 async function loadSuggestions(query){
     if(!query || query.length < 2){
         hideSuggestions();
+        return;
+    }
+    const cached = cachedSuggestions(query);
+    if(cached){
+        if(suggestionController) suggestionController.abort();
+        renderSuggestionsOnce(cached, query);
         return;
     }
     if(suggestionController) suggestionController.abort();
@@ -423,7 +475,10 @@ async function loadSuggestions(query){
         if(!response.ok){ hideSuggestions(); return; }
         const data = await response.json();
         const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
-        showSuggestions(suggestions, query);
+        rememberSuggestions(query, suggestions);
+        // Ignore a late answer for text the user has already changed.
+        if(suggestionKey(activeSuggestionInput().value) !== suggestionKey(query)) return;
+        renderSuggestionsOnce(suggestions, query);
     }catch(error){
         if(error.name !== "AbortError") hideSuggestions();
     }
@@ -438,7 +493,16 @@ input.addEventListener("input", function(){
     const value = this.value.trim();
     clearTimeout(suggestionTimer);
     if(!value){ hideSuggestions(); return; }
-    suggestionTimer = setTimeout(() => loadSuggestions(value), 180);
+    // Known prefix: show immediately, no debounce and no network request.
+    if(value.length >= 2 && cachedSuggestions(value)){
+        loadSuggestions(value);
+        return;
+    }
+    // New prefix: filter the previous predictions locally right away, then
+    // ask the server after a short pause in typing.
+    const instant = value.length >= 2 ? instantSuggestions(value) : null;
+    if(instant && instant.length) renderSuggestionsOnce(instant, value);
+    suggestionTimer = setTimeout(() => loadSuggestions(value), 100);
 });
 
 input.addEventListener("keydown", async function(event){
@@ -4497,3 +4561,8 @@ async function deleteAlert(id){if(!await openAppMessageModal('Remove this alert?
 async function generateBriefing(){const box=document.getElementById('miBriefing');box.textContent='Generating briefing…';try{const d=await miFetch('/api/me/briefing',{method:'POST'});box.textContent=d.body+`\n\n${d.article_count} articles considered · Generated ${new Date(d.generated_at).toLocaleString()}`;}catch(e){box.textContent='Unable to generate briefing: '+e.message;}}
 
 
+
+
+/* Wake the API early (Render instances sleep when idle) and open the HTTPS
+   connection before the user's first keystroke. */
+fetch(API + "/health", {cache: "no-store"}).catch(() => {});

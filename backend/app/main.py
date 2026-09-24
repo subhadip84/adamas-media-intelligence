@@ -34,6 +34,7 @@ from fastapi import (
 )
 
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from fastapi.responses import RedirectResponse, Response
 
@@ -1027,7 +1028,7 @@ def _extract_directory_feed_links(page_url: str, body: str) -> list[str]:
     candidates: list[str] = []
     # href-based directory links
     for match in re.finditer(r'<a\b[^>]*?href=["\']([^"\']+)["\'][^>]*>', body, re.I | re.S):
-        href = html.unescape(match.group(1).strip())
+        href = html_lib.unescape(match.group(1).strip())
         absolute = urljoin(page_url, href)
         path = urlparse(absolute).path.lower()
         if any(marker in path for marker in ("/rss", "/feed", "/feeds", "syndication")) or path.endswith((".xml", ".rss", ".atom", ".cms")):
@@ -1994,6 +1995,9 @@ app = FastAPI(
 # =========================================================
 # CORS
 # =========================================================
+
+# Compress JSON responses (a 50-result search is ~75 KB raw, ~17 KB gzipped).
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.add_middleware(
 
@@ -3886,6 +3890,7 @@ def popular_searches(
 
 @app.get("/api/search/suggestions")
 def search_suggestions(
+    response: Response,
     q: str = Query(min_length=1, max_length=100),
     db: Session = Depends(get_db),
 ):
@@ -3900,6 +3905,8 @@ def search_suggestions(
 
     This endpoint does not consume search quota.
     """
+    # Let the browser reuse predictions while the user types/backspaces.
+    response.headers["Cache-Control"] = "public, max-age=60"
     query_text = _normalise_suggestion(q)
     if not query_text:
         return {"status": "success", "query": q, "suggestions": []}
@@ -4180,91 +4187,28 @@ def search_filter_options(
     }
 
 
-@app.get("/api/search")
-def search(
-    q: str = Query(min_length=1, max_length=200),
-    user_key: str = Header(alias="X-User-Key"),
-    x_auth_token: Optional[str] = Header(None, alias="X-Auth-Token"),
-    filter_only: bool = Header(False, alias="X-Filter-Only"),
-    date_range: str = Query("30", max_length=10),
-    categories: str = Query("", max_length=500),
-    language: str = Query("", max_length=100),
-    source: str = Query("", max_length=255),
-    db: Session = Depends(get_db),
-):
-    subscriber = _subscriber_from_token(
-        x_auth_token,
-        db,
-    )
 
-    effective_user_key = (
-        subscriber.user_key
-        if subscriber
-        else user_key
-    )
+# Ranked results for identical searches (same normalised query + filters).
+SEARCH_RESULT_TTL = int(os.getenv("SEARCH_RESULT_TTL", "60"))
+_SEARCH_RESULT_CACHE = _TTLCache(maxsize=512)
 
-    usage = db.scalar(
-        select(Usage).where(
-            Usage.user_key == effective_user_key
-        )
-    )
 
-    if not usage:
-        usage = Usage(
-            user_key=effective_user_key,
-            searches_used=0,
-            subscribed=bool(subscriber),
-        )
-        db.add(usage)
-        db.commit()
-        db.refresh(usage)
+def _search_ranked_payload(
+    db: Session,
+    q: str,
+    query_text: str,
+    tokens: list,
+    search_context: dict,
+    date_range: str,
+    selected_categories: list,
+    language: str,
+    source: str,
+) -> tuple:
+    """SQL candidate retrieval + ranking + serialisation for /api/search.
 
-    is_subscriber = bool(subscriber)
-
-    # Read once per request (previously up to 4 identical queries).
-    free_limit = get_free_search_limit(db)
-
-    # A normal search that would exceed the free allowance is blocked.
-    # Filter-only refreshes are allowed without consuming quota because the
-    # user is refining an already executed search.
-    if (
-        not filter_only
-        and not is_subscriber
-        and usage.searches_used >= free_limit
-    ):
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "message": "Free search limit reached.",
-                "free_limit": free_limit,
-                "searches_used": usage.searches_used,
-                "remaining": 0,
-            },
-        )
-
-    # Prepare query-only ranking signals once and reuse them everywhere.
-    search_context = _prepare_search_context(q)
-    query_text = search_context["q"]
-    tokens = search_context["q_tokens"]
-
-    if not query_text:
-        return {
-            "status": "success",
-            "query": q,
-            "count": 0,
-            "free_limit": free_limit,
-            "searches_used": usage.searches_used,
-            "remaining": (
-                None if is_subscriber
-                else max(0, free_limit - usage.searches_used)
-            ),
-            "subscribed": is_subscriber,
-            "results": [],
-        }
-
-    # Candidate retrieval: require meaningful query terms somewhere in
-    # title/summary/category/source. Ranking and entity-level matching happen
-    # in Python after retrieval.
+    Returns (results_payload, result_count). Moved out of search() unchanged
+    so the result can be cached; quota logic stays in search().
+    """
     token_conditions = []
     retrieval_terms = set(tokens[:12])
 
@@ -4363,11 +4307,6 @@ def search(
         search_conditions.append(Source.name.ilike(source.strip()))
 
     # Category aliases mirror the filter labels in the frontend.
-    selected_categories = [
-        item.strip().lower()
-        for item in categories.split(",")
-        if item.strip() and item.strip().lower() != "all"
-    ]
     if selected_categories:
         category_conditions = []
         for category in selected_categories:
@@ -4522,6 +4461,145 @@ def search(
     # IMPORTANT: a zero-result search does NOT consume quota.
     result_count = len(ranked_rows)
 
+    results_payload = [
+        {
+            "id": article.id,
+            "relevance_score": round(score, 2),
+            "is_most_relevant": bool(
+                top_score is not None and score == top_score
+            ),
+            "relevance_label": (
+                "Most relevant"
+                if top_score is not None and score == top_score
+                else "Relevant"
+            ),
+            "title": article.title,
+            "url": article.url,
+            "image_url": article.image_url,
+            "summary": article.summary,
+            "category": article.category,
+            "language": article.language,
+            "published_at": article.published_at,
+            "source": source_row.name,
+            "source_website": source_row.website,
+        }
+        for score, article, source_row in ranked_rows
+    ]
+
+    return results_payload, result_count
+
+@app.get("/api/search")
+def search(
+    q: str = Query(min_length=1, max_length=200),
+    user_key: str = Header(alias="X-User-Key"),
+    x_auth_token: Optional[str] = Header(None, alias="X-Auth-Token"),
+    filter_only: bool = Header(False, alias="X-Filter-Only"),
+    date_range: str = Query("30", max_length=10),
+    categories: str = Query("", max_length=500),
+    language: str = Query("", max_length=100),
+    source: str = Query("", max_length=255),
+    db: Session = Depends(get_db),
+):
+    subscriber = _subscriber_from_token(
+        x_auth_token,
+        db,
+    )
+
+    effective_user_key = (
+        subscriber.user_key
+        if subscriber
+        else user_key
+    )
+
+    usage = db.scalar(
+        select(Usage).where(
+            Usage.user_key == effective_user_key
+        )
+    )
+
+    if not usage:
+        usage = Usage(
+            user_key=effective_user_key,
+            searches_used=0,
+            subscribed=bool(subscriber),
+        )
+        db.add(usage)
+        db.commit()
+        db.refresh(usage)
+
+    is_subscriber = bool(subscriber)
+
+    # Read once per request (previously up to 4 identical queries).
+    free_limit = get_free_search_limit(db)
+
+    # A normal search that would exceed the free allowance is blocked.
+    # Filter-only refreshes are allowed without consuming quota because the
+    # user is refining an already executed search.
+    if (
+        not filter_only
+        and not is_subscriber
+        and usage.searches_used >= free_limit
+    ):
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "message": "Free search limit reached.",
+                "free_limit": free_limit,
+                "searches_used": usage.searches_used,
+                "remaining": 0,
+            },
+        )
+
+    # Prepare query-only ranking signals once and reuse them everywhere.
+    search_context = _prepare_search_context(q)
+    query_text = search_context["q"]
+    tokens = search_context["q_tokens"]
+
+    if not query_text:
+        return {
+            "status": "success",
+            "query": q,
+            "count": 0,
+            "free_limit": free_limit,
+            "searches_used": usage.searches_used,
+            "remaining": (
+                None if is_subscriber
+                else max(0, free_limit - usage.searches_used)
+            ),
+            "subscribed": is_subscriber,
+            "results": [],
+        }
+
+    # Candidate retrieval: require meaningful query terms somewhere in
+    # title/summary/category/source. Ranking and entity-level matching happen
+    # in Python after retrieval.
+    # -------------------------------------------------------------
+    # Short-lived cache of the ranked results for identical searches.
+    # Retrieval + ranking are skipped on a hit; quota counting, search
+    # logging and the response below are still processed per request.
+    # -------------------------------------------------------------
+    selected_categories = [
+        item.strip().lower()
+        for item in categories.split(",")
+        if item.strip() and item.strip().lower() != "all"
+    ]
+    search_cache_key = (
+        query_text,
+        date_range.strip(),
+        tuple(sorted(selected_categories)),
+        language.strip().lower(),
+        source.strip().lower(),
+    )
+    cached_search = _SEARCH_RESULT_CACHE.get(search_cache_key)
+    if cached_search is not None:
+        results_payload, result_count = cached_search
+    else:
+        results_payload, result_count = _search_ranked_payload(
+            db, q, query_text, tokens, search_context,
+            date_range, selected_categories, language, source,
+        )
+        _SEARCH_RESULT_CACHE.set(search_cache_key, (results_payload, result_count), SEARCH_RESULT_TTL)
+
     # Only a new user search is counted. Filter-only refreshes are generated
     # by changing Date/Category/Language/Source and must not consume quota or
     # alter search popularity statistics.
@@ -4548,35 +4626,7 @@ def search(
         if result_count > 0 and not is_subscriber:
             usage.searches_used += 1
 
-    # Serialise the response BEFORE commit. db.commit() expires every ORM
-    # object, so reading article/source attributes afterwards re-SELECTed each
-    # of the 50 articles and their sources one by one (~88 extra queries per
-    # search, each paying the full network round trip to Render PostgreSQL).
     searches_used = usage.searches_used
-    results_payload = [
-        {
-            "id": article.id,
-            "relevance_score": round(score, 2),
-            "is_most_relevant": bool(
-                top_score is not None and score == top_score
-            ),
-            "relevance_label": (
-                "Most relevant"
-                if top_score is not None and score == top_score
-                else "Relevant"
-            ),
-            "title": article.title,
-            "url": article.url,
-            "image_url": article.image_url,
-            "summary": article.summary,
-            "category": article.category,
-            "language": article.language,
-            "published_at": article.published_at,
-            "source": source_row.name,
-            "source_website": source_row.website,
-        }
-        for score, article, source_row in ranked_rows
-    ]
 
     db.commit()
 
