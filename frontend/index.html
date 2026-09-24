@@ -2384,35 +2384,37 @@ window.addEventListener("resize", function(){
 </script>
 <script id="ami-searching-state-js">
 (function(){
-    function getButton(){
-        return document.getElementById('amiSearchButton');
+    function getButtons(){
+        return [
+            document.getElementById('amiSearchButton'),
+            document.getElementById('amiSearchResultsDockButton'),
+            document.querySelector('#amiSearchFreezeBar button[type="submit"], #amiSearchFreezeBar input[type="submit"]')
+        ].filter(Boolean);
     }
 
     function setSearching(){
-        const button = getButton();
-        if(!button) return;
-        const label = button.querySelector('.ami-search-button-label');
+        getButtons().forEach(function(button){
+            const label = button.querySelector('.ami-search-button-label');
 
-        button.classList.add('ami-searching');
-        if(label) label.textContent = 'Searching...';
-        button.setAttribute('aria-busy','true');
-        button.setAttribute('aria-label','Searching');
+            button.classList.add('ami-searching');
+            if(label) label.textContent = 'Searching...';
+            button.setAttribute('aria-busy','true');
+            button.setAttribute('aria-label','Searching');
 
-        // Disable only AFTER performSearch() has actually started.
-        // This prevents cancelling the native form submit event.
-        button.disabled = true;
+            button.disabled = true;
+        });
     }
 
     function setReady(){
-        const button = getButton();
-        if(!button) return;
-        const label = button.querySelector('.ami-search-button-label');
+        getButtons().forEach(function(button){
+            const label = button.querySelector('.ami-search-button-label');
 
-        button.classList.remove('ami-searching');
-        if(label) label.textContent = 'Search';
-        button.removeAttribute('aria-busy');
-        button.setAttribute('aria-label','Search');
-        button.disabled = false;
+            button.classList.remove('ami-searching');
+            if(label) label.textContent = 'Search';
+            button.removeAttribute('aria-busy');
+            button.setAttribute('aria-label','Search');
+            button.disabled = false;
+        });
     }
 
     window.amiSetSearchButtonSearching = setSearching;
@@ -2944,6 +2946,9 @@ document.addEventListener('keydown',function(event){if(event.key==='Escape')clos
         originalInput.dispatchEvent(new Event('input',{bubbles:true}));
       }
       const originalForm=document.getElementById('searchForm');
+      if(typeof window.amiSetSearchButtonSearching==='function'){
+        window.amiSetSearchButtonSearching();
+      }
       if(originalForm) originalForm.requestSubmit();
     });
     if(dockInput){

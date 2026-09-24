@@ -1606,7 +1606,7 @@ body.ami-dark #amiSearchFreezeBar{
   margin:0 !important;
   background:rgba(255,255,255,.98) !important;
   border:0 !important;
-  border-bottom:1px solid #dce5ee !important;
+  border-bottom:0 !important;
   border-radius:0 !important;
   box-shadow:0 4px 18px rgba(16,42,70,.12) !important;
   backdrop-filter:blur(10px) !important;
@@ -1678,4 +1678,79 @@ body.ami-dark #amiSearchResultsDock{background:rgba(9,21,34,.98) !important;bord
 #amiSearchResultsDock .ami-frozen-suggest-wrap .search-suggestions.show,
 #amiSearchFreezeBar .ami-frozen-suggest-wrap .search-suggestions.show{
   display:block !important;
+}
+
+
+
+/* FINAL: remove inherited search focus/border styling from frozen search only */
+#amiSearchFreezeBar .ami-freeze-form,
+#amiSearchFreezeBar .ami-freeze-form:focus-within,
+#amiSearchFreezeBar .ami-freeze-input,
+#amiSearchFreezeBar .ami-freeze-input:focus,
+#amiSearchFreezeBar .ami-freeze-input:focus-visible,
+#amiSearchFreezeBar .ami-freeze-input:active{
+    border:0 !important;
+    outline:0 !important;
+    box-shadow:none !important;
+    background-image:none !important;
+    -webkit-appearance:none !important;
+    appearance:none !important;
+}
+
+/* Frozen search button loading indicator */
+.ami-search-btn-loading{
+    display:inline-block;
+    width:14px;
+    height:14px;
+    margin-right:6px;
+    vertical-align:-2px;
+    border:2px solid currentColor;
+    border-right-color:transparent;
+    border-radius:50%;
+    animation:amiSearchBtnSpin .7s linear infinite;
+}
+
+@keyframes amiSearchBtnSpin{
+    to{transform:rotate(360deg);}
+}
+
+
+/* Remove browser focus outline from the frozen search input only */
+#amiSearchFreezeBar .ami-freeze-input,
+#amiSearchFreezeBar .ami-freeze-input:focus,
+#amiSearchFreezeBar .ami-freeze-input:focus-visible{
+  outline:0 !important;
+  box-shadow:none !important;
+  border:0 !important;
+  border-color:transparent !important;
+  -webkit-appearance:none !important;
+  appearance:none !important;
+}
+
+
+/* =========================================================
+   FROZEN SEARCH BAR: NO BLUE FOCUS LINE
+   Apply the same focus reset to the cloned frozen search inputs.
+========================================================= */
+#amiSearchFreezeBar #amiSearchFreezeInput,
+#amiSearchFreezeBar #amiSearchFreezeInput:focus,
+#amiSearchFreezeBar #amiSearchFreezeInput:focus-visible,
+#amiSearchFreezeBar #amiSearchFreezeInput:active,
+#amiSearchResultsDock #amiSearchResultsDockInput,
+#amiSearchResultsDock #amiSearchResultsDockInput:focus,
+#amiSearchResultsDock #amiSearchResultsDockInput:focus-visible,
+#amiSearchResultsDock #amiSearchResultsDockInput:active,
+body.ami-dark #amiSearchFreezeBar #amiSearchFreezeInput:focus,
+body.ami-dark #amiSearchResultsDock #amiSearchResultsDockInput:focus{
+  border:0 !important;
+  outline:none !important;
+  box-shadow:none !important;
+  -webkit-appearance:none !important;
+  appearance:none !important;
+}
+
+#amiSearchFreezeBar #amiSearchFreezeInput::-webkit-search-cancel-button,
+#amiSearchResultsDock #amiSearchResultsDockInput::-webkit-search-cancel-button{
+  -webkit-appearance:none !important;
+  appearance:none !important;
 }
