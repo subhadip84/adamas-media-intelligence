@@ -2725,7 +2725,6 @@ def _education_match_conditions():
     conditions = []
     for pattern in EDUCATION_FILTER_TERMS:
         conditions.extend([
-            Article.category.ilike(pattern),
             Article.title.ilike(pattern),
             Article.summary.ilike(pattern),
         ])
@@ -3607,8 +3606,7 @@ def search_diagnostic(
             conditions.extend([
                 Article.title.ilike(pattern),
                 Article.summary.ilike(pattern),
-                Article.category.ilike(pattern),
-                Source.name.ilike(pattern),
+                    Source.name.ilike(pattern),
             ])
         token_matches[token] = db.scalar(
             select(func.count())
@@ -3898,8 +3896,7 @@ def search(
                 }.get(category, [f"%{category}%"])
                 for pattern in aliases:
                     category_conditions.extend([
-                        Article.category.ilike(pattern),
-                        Article.title.ilike(pattern),
+                                    Article.title.ilike(pattern),
                         Article.summary.ilike(pattern),
                     ])
         if category_conditions:
@@ -6806,6 +6803,7 @@ def reset_all_users(
         get_free_search_limit(db),
 
     }
+
 
 
 
