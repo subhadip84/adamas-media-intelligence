@@ -3540,7 +3540,7 @@ def search_suggestions(
     # 3. Source names and categories.
     # ---------------------------------------------------------
     source_rows = db.execute(
-        select(Source.name).where(Source.name.is_not(None)).limit(300)
+        select(Source.name).where(Source.name.is_not(None)).limit(800)
     ).all()
     for (name,) in source_rows:
         score = _suggestion_match_score(q, name)
@@ -3909,7 +3909,7 @@ def search(
         select(Article, Source)
         .join(Source, Article.source_id == Source.id)
         .where(*search_conditions)
-        .limit(300)
+        .limit(800)
     ).all()
 
     # Campus-aware hard gate. SQL token matching intentionally remains broad
@@ -6806,6 +6806,7 @@ def reset_all_users(
         get_free_search_limit(db),
 
     }
+
 
 
 
