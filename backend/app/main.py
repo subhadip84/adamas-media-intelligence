@@ -7,11 +7,12 @@ import hmac
 import calendar
 import re
 import difflib
+import threading
 from functools import lru_cache
 import html as html_lib
 import json
 import asyncio
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from html.parser import HTMLParser
 
 from datetime import datetime, timezone, timedelta
@@ -51,6 +52,9 @@ from sqlalchemy import (
     func,
 )
 
+# Aliased: many functions in this module use local variables named text/update.
+from sqlalchemy import text as sa_text, update as sa_update
+
 from sqlalchemy.exc import IntegrityError
 
 from sqlalchemy.orm import (
@@ -82,6 +86,44 @@ FREE_SEARCH_LIMIT = int(
         "4",
     )
 )
+
+
+# ---------------------------------------------------------
+# SEARCH PERFORMANCE SETTINGS
+# ---------------------------------------------------------
+# Number of SQL candidates ranked in Python per search (unchanged default).
+SEARCH_CANDIDATE_LIMIT = max(50, int(os.getenv("SEARCH_CANDIDATE_LIMIT", "800")))
+# Articles whose normalised search text is kept in memory between searches.
+SEARCH_ARTICLE_CACHE_SIZE = max(1000, int(os.getenv("SEARCH_ARTICLE_CACHE_SIZE", "20000")))
+# Create pg_trgm / search indexes at startup (in a background thread).
+CREATE_SEARCH_INDEXES = os.getenv("CREATE_SEARCH_INDEXES", "true").strip().lower() in {"1", "true", "yes", "on"}
+# Pre-compute search text for the newest articles at startup.
+SEARCH_CACHE_WARMUP = os.getenv("SEARCH_CACHE_WARMUP", "true").strip().lower() in {"1", "true", "yes", "on"}
+# A publisher page that had no preview image is not fetched again for N days.
+IMAGE_RECHECK_DAYS = int(os.getenv("IMAGE_RECHECK_DAYS", "7"))
+
+
+class _LRUCache:
+    """Small thread-safe LRU cache (sync endpoints run in a threadpool)."""
+
+    def __init__(self, maxsize: int):
+        self.maxsize = maxsize
+        self._data = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            value = self._data.get(key)
+            if value is not None:
+                self._data.move_to_end(key)
+            return value
+
+    def set(self, key, value):
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > self.maxsize:
+                self._data.popitem(last=False)
 
 
 AUTO_RSS_DISCOVERY_KEY = "auto_rss_discovery_enabled"
@@ -222,7 +264,7 @@ def _epaper_candidate_score(url, label=""):
         score += 3
     if re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", u):
         score += 2
-    if any(token in t for token in ("edition", "e-paper", "epaper", "newspaper", "αñåαñ£ αñòαñ╛", "αñ╕αñéαñ╕αÑìαñòαñ░αñú")):
+    if any(token in t for token in ("edition", "e-paper", "epaper", "newspaper", "आज का", "संस्करण")):
         score += 3
     if any(token in u for token in ("login", "signin", "sign-in", "subscribe", "subscription", "contact-us", "terms", "privacy")):
         score -= 4
@@ -527,6 +569,14 @@ class Article(Base):
     # Article thumbnail / news image
     image_url: Mapped[Optional[str]] = mapped_column(
         String(2000),
+        nullable=True,
+    )
+
+    # When the publisher page was last checked for a preview image, so pages
+    # without an image are not re-fetched on every view. Added to existing
+    # databases by _ensure_schema() at startup.
+    image_checked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
         nullable=True,
     )
 
@@ -1265,6 +1315,13 @@ async def auto_discovery_worker() -> None:
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
+    # Explicit pool sizing. The default (5 + 10 overflow, 30 s wait) could be
+    # exhausted by image-resolver requests, making /api/search wait for a
+    # free connection. pool_recycle avoids stale connections on Render.
+    pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+    pool_timeout=int(os.getenv("DB_POOL_TIMEOUT", "10")),
+    pool_recycle=1800,
 )
 
 SessionLocal = sessionmaker(
@@ -1283,6 +1340,64 @@ def get_db():
 
     finally:
         db.close()
+
+
+# =========================================================
+# SCHEMA UPGRADE + SEARCH INDEXES (PostgreSQL)
+# =========================================================
+# Base.metadata.create_all() never adds columns to existing tables and never
+# creates trigram indexes. Without pg_trgm GIN indexes every
+# "ILIKE '%term%'" in /api/search is a sequential scan of the articles table.
+
+SEARCH_INDEX_DDL = [
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_articles_title_trgm "
+    "ON articles USING gin (title gin_trgm_ops)",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_articles_summary_trgm "
+    "ON articles USING gin (summary gin_trgm_ops)",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_articles_category_trgm "
+    "ON articles USING gin (category gin_trgm_ops)",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_articles_published_at_desc "
+    "ON articles (published_at DESC NULLS LAST)",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_search_query_log_normalized_trgm "
+    "ON search_query_log USING gin (normalized_query gin_trgm_ops)",
+    "ANALYZE articles",
+]
+
+
+def _ensure_schema() -> None:
+    """Additive column upgrade; runs before the API serves requests."""
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.connect() as conn:
+        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+        conn.execute(sa_text(
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS image_checked_at TIMESTAMPTZ"
+        ))
+
+
+def _ensure_search_indexes() -> None:
+    """Create search indexes without blocking writes (CONCURRENTLY).
+
+    Runs in a background thread so a first-time build does not delay startup.
+    If a CONCURRENTLY build is interrupted it leaves an INVALID index; find it
+    with  SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;
+    and DROP INDEX CONCURRENTLY it so the next startup rebuilds it.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+            for statement in SEARCH_INDEX_DDL:
+                started = time.perf_counter()
+                try:
+                    conn.execute(sa_text(statement))
+                    print(f"[search-index] ok in {time.perf_counter() - started:.1f}s: {statement[:90]}", flush=True)
+                except Exception as exc:
+                    print(f"[search-index] FAILED: {statement[:90]} -> {exc}", flush=True)
+    except Exception as exc:
+        print(f"[search-index] could not connect: {exc}", flush=True)
 
 
 # =========================================================
@@ -1863,6 +1978,25 @@ def startup():
     if last_error is not None:
         raise last_error
 
+    # Additive column upgrade (image_checked_at) before serving requests.
+    _ensure_schema()
+
+    # Trigram / search indexes are built in the background.
+    if CREATE_SEARCH_INDEXES:
+        threading.Thread(
+            target=_ensure_search_indexes,
+            name="search-index-builder",
+            daemon=True,
+        ).start()
+
+    # Pre-compute search text for recent articles (background, best effort).
+    if SEARCH_CACHE_WARMUP:
+        threading.Thread(
+            target=_warm_search_cache,
+            name="search-cache-warmup",
+            daemon=True,
+        ).start()
+
     with SessionLocal() as db:
 
         source_count = db.scalar(
@@ -2395,62 +2529,110 @@ def reset_search_quota(
 # ARTICLE IMAGE RESOLVER
 # =========================================================
 
+# Article ids whose publisher page is being fetched right now.
+_image_fetch_inflight: set[int] = set()
+_image_fetch_lock = threading.Lock()
+
+
 @app.get("/api/articles/{article_id}/image")
 def resolve_article_image(
     article_id: int,
-    db: Session = Depends(
-        get_db
-    ),
 ):
 
     """
     Returns the article's image. Existing image URLs are reused.
     If an older article has no stored image, the publisher page is
-    checked once, the discovered image is saved, and the browser is
-    redirected to it.
+    checked, the result is remembered (image_url on success,
+    image_checked_at in both cases), and the browser is redirected.
+
+    PERFORMANCE: the database connection is no longer held during the
+    publisher fetch (up to 10 s each). Previously a results page full of
+    image-less articles pinned most of the connection pool, so the next
+    /api/search waited for a free connection.
     """
 
-    article = db.get(
-        Article,
-        article_id,
-    )
+    with SessionLocal() as db:
 
-    if not article:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Article not found.",
+        article = db.get(
+            Article,
+            article_id,
         )
 
-    image_url = clean_image_url(
-        article.image_url,
-        article.url,
-    )
+        if not article:
 
-    if not image_url:
-
-        image_url = extract_image_from_article_url(
-            article.url
-        )
-
-        if image_url:
-
-            article.image_url = (
-                image_url[:2000]
+            raise HTTPException(
+                status_code=404,
+                detail="Article not found.",
             )
 
-            db.commit()
+        page_url = article.url
 
-    if not image_url:
+        image_url = clean_image_url(
+            article.image_url,
+            article.url,
+        )
+
+        checked_at = article.image_checked_at
+
+    if image_url:
+
+        return RedirectResponse(
+            url=image_url,
+            status_code=302,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if checked_at is not None:
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=timezone.utc)
+        if now - checked_at < timedelta(days=IMAGE_RECHECK_DAYS):
+            raise HTTPException(
+                status_code=404,
+                detail="Article image not available.",
+                headers={"Cache-Control": "public, max-age=3600"},
+            )
+
+    with _image_fetch_lock:
+        if article_id in _image_fetch_inflight:
+            raise HTTPException(
+                status_code=404,
+                detail="Article image lookup in progress.",
+            )
+        _image_fetch_inflight.add(article_id)
+
+    try:
+        # Network call with no database connection held.
+        found = extract_image_from_article_url(page_url)
+    finally:
+        with _image_fetch_lock:
+            _image_fetch_inflight.discard(article_id)
+
+    values = {"image_checked_at": now}
+    if found:
+        values["image_url"] = found[:2000]
+
+    with SessionLocal() as db:
+        db.execute(
+            sa_update(Article)
+            .where(Article.id == article_id)
+            .values(**values)
+        )
+        db.commit()
+
+    if not found:
 
         raise HTTPException(
             status_code=404,
             detail="Article image not available.",
+            headers={"Cache-Control": "public, max-age=3600"},
         )
 
     return RedirectResponse(
-        url=image_url,
+        url=found,
         status_code=302,
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 
@@ -2464,32 +2646,54 @@ SEARCH_STOP_WORDS = {
     "with", "was", "were", "what", "when", "where", "who", "why",
 }
 
+# Precompiled patterns (identical semantics to the previous inline re.sub calls).
+_RE_SEARCH_SCRIPT = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
+_RE_SEARCH_STYLE = re.compile(r"<style\b[^>]*>.*?</style>", re.I | re.S)
+_RE_SEARCH_TAG = re.compile(r"<[^>]+>")
+_RE_SEARCH_URL = re.compile(r"https?://\S+")
+_RE_SEARCH_NBSP = re.compile(r"[\u00a0\u200b]+")
+_RE_SEARCH_WS = re.compile(r"\s+")
+_RE_SEARCH_NON_WORD_RUN = re.compile(r"[^a-z0-9\u0900-\u097f\u0980-\u09ff]+")
+_RE_SEARCH_NON_WORD_CHAR = re.compile(r"[^a-z0-9\u0900-\u097f\u0980-\u09ff]")
+
+
 def _clean_search_text(value: Optional[str]) -> str:
     """Convert publisher HTML/entities into searchable plain text."""
     if not value:
         return ""
     value = html_lib.unescape(value)
-    value = re.sub(r"<script\b[^>]*>.*?</script>", " ", value, flags=re.I | re.S)
-    value = re.sub(r"<style\b[^>]*>.*?</style>", " ", value, flags=re.I | re.S)
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = re.sub(r"https?://\S+", " ", value)
-    value = re.sub(r"[\u00a0\u200b]+", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
+    value = _RE_SEARCH_SCRIPT.sub(" ", value)
+    value = _RE_SEARCH_STYLE.sub(" ", value)
+    value = _RE_SEARCH_TAG.sub(" ", value)
+    value = _RE_SEARCH_URL.sub(" ", value)
+    value = _RE_SEARCH_NBSP.sub(" ", value)
+    return _RE_SEARCH_WS.sub(" ", value).strip()
+
+
+def _normalise_from_clean(clean: str) -> str:
+    value = _RE_SEARCH_NON_WORD_RUN.sub(" ", clean.lower())
+    return _RE_SEARCH_WS.sub(" ", value).strip()
+
+
+def _compact_from_clean(clean: str) -> str:
+    return _RE_SEARCH_NON_WORD_CHAR.sub("", clean.lower())
 
 
 def _normalise_search(value: Optional[str]) -> str:
-    value = _clean_search_text(value).lower()
-    value = re.sub(r"[^a-z0-9\u0900-\u097f\u0980-\u09ff]+", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
+    return _normalise_from_clean(_clean_search_text(value))
+
+
+# Short, highly repetitive strings (source names, categories).
+_normalise_short = lru_cache(maxsize=4096)(_normalise_search)
 
 
 def _compact_search(value: Optional[str]) -> str:
     """Normalize identifiers/acronyms without separators: IIT-B -> iitb."""
-    value = _clean_search_text(value).lower()
-    return re.sub(r"[^a-z0-9\u0900-\u097f\u0980-\u09ff]", "", value)
+    return _compact_from_clean(_clean_search_text(value))
 
 
-def _token_variants(token: str) -> set[str]:
+@lru_cache(maxsize=8192)
+def _token_variants(token: str) -> frozenset:
     """Small morphology helper so application/applications etc. match."""
     variants = {token}
     if len(token) > 4:
@@ -2501,8 +2705,7 @@ def _token_variants(token: str) -> set[str]:
             variants.add(token[:-1])
         else:
             variants.add(token + "s")
-    return variants
-
+    return frozenset(variants)
 
 
 # =========================================================
@@ -2596,34 +2799,6 @@ IIT_CAMPUS_ALIASES = {
 }
 
 
-@lru_cache(maxsize=512)
-def _iit_campus_codes(value: str) -> set[str]:
-    """Return canonical IIT campus codes represented by a query or article text."""
-    normalized = _normalise_search(value)
-    compact = _compact_search(value)
-    if not normalized and not compact:
-        return set()
-
-    found = set()
-    for code, aliases in IIT_CAMPUS_ALIASES.items():
-        for alias in aliases:
-            alias_norm = _normalise_search(alias)
-            alias_compact = _compact_search(alias)
-            if alias_norm and alias_norm in normalized:
-                found.add(code)
-                break
-            if alias_compact and alias_compact in compact:
-                found.add(code)
-                break
-
-    # Also support compact shorthand forms such as IITB/IITM/IITD.
-    for code in ("b", "m", "d", "k", "g", "h", "j", "r"):
-        if f"iit{code}" in compact:
-            found.add(code)
-
-    return found
-
-
 # =========================================================
 # GENERIC HIGHER-EDUCATION ENTITY NORMALISATION
 # =========================================================
@@ -2666,31 +2841,156 @@ INSTITUTION_CAMPUS_ALIASES = {
 }
 
 
-def _institution_campus_codes(value: str) -> set[str]:
-    """Return canonical IIM campus identifiers represented by text."""
-    normalized = _normalise_search(value)
-    compact = _compact_search(value)
+# Aliases are normalised ONCE at import time. Previously every alias was
+# re-normalised (several regex passes) for every candidate article.
+def _alias_table(alias_map: dict) -> tuple:
+    return tuple(
+        (code, tuple((_normalise_search(a), _compact_search(a)) for a in aliases))
+        for code, aliases in alias_map.items()
+    )
+
+
+_IIT_ALIAS_TABLE = _alias_table(IIT_CAMPUS_ALIASES)
+_IIM_ALIAS_TABLE = _alias_table(INSTITUTION_CAMPUS_ALIASES)
+
+
+def _iit_codes_prepared(normalized: str, compact: str) -> set[str]:
     if not normalized and not compact:
         return set()
-
     found = set()
-    for code, aliases in INSTITUTION_CAMPUS_ALIASES.items():
-        for alias in aliases:
-            if (
-                _normalise_search(alias) in normalized
-                or _compact_search(alias) in compact
-            ):
+    for code, pairs in _IIT_ALIAS_TABLE:
+        for alias_norm, alias_compact in pairs:
+            if alias_norm and alias_norm in normalized:
+                found.add(code)
+                break
+            if alias_compact and alias_compact in compact:
+                found.add(code)
+                break
+    # Also support compact shorthand forms such as IITB/IITM/IITD.
+    for code in ("b", "m", "d", "k", "g", "h", "j", "r"):
+        if f"iit{code}" in compact:
+            found.add(code)
+    return found
+
+
+def _iim_codes_prepared(normalized: str, compact: str) -> set[str]:
+    if not normalized and not compact:
+        return set()
+    found = set()
+    for code, pairs in _IIM_ALIAS_TABLE:
+        for alias_norm, alias_compact in pairs:
+            if alias_norm in normalized or alias_compact in compact:
                 found.add(code)
                 break
     return found
 
 
+def _entity_codes_prepared(normalized: str, compact: str) -> set[str]:
+    return {
+        *(f"iit:{code}" for code in _iit_codes_prepared(normalized, compact)),
+        *(f"iim:{code}" for code in _iim_codes_prepared(normalized, compact)),
+    }
+
+
+def _iit_campus_codes(value: str) -> set[str]:
+    """Return canonical IIT campus codes represented by a query or article text."""
+    return _iit_codes_prepared(_normalise_search(value), _compact_search(value))
+
+
+def _institution_campus_codes(value: str) -> set[str]:
+    """Return canonical IIM campus identifiers represented by text."""
+    return _iim_codes_prepared(_normalise_search(value), _compact_search(value))
+
+
 def _search_entity_codes(value: str) -> set[str]:
     """Return all campus-specific higher-education entity codes."""
-    return {
-        *(f"iit:{code}" for code in _iit_campus_codes(value)),
-        *(f"iim:{code}" for code in _institution_campus_codes(value)),
-    }
+    return _entity_codes_prepared(_normalise_search(value), _compact_search(value))
+
+
+# =========================================================
+# PER-ARTICLE NORMALISED SEARCH TEXT (CACHED)
+# =========================================================
+# The ranker used to strip HTML from every candidate's summary ~8 times per
+# search, for up to 800 candidates, on every request. The cleaned forms only
+# depend on the article text, so they are computed once and reused.
+
+class _ArticleSearchFields:
+    __slots__ = (
+        "title",
+        "summary",
+        "title_compact",
+        "summary_compact",
+        "title_words",
+        "summary_words",
+        "title_tokens",
+        "_entity_codes",
+    )
+
+    def __init__(self, title_raw: str, summary_raw: str):
+        title_clean = _clean_search_text(title_raw)
+        summary_clean = _clean_search_text(summary_raw)
+        self.title = _normalise_from_clean(title_clean)
+        self.summary = _normalise_from_clean(summary_clean)
+        self.title_compact = _compact_from_clean(title_clean)
+        self.summary_compact = _compact_from_clean(summary_clean)
+        self.title_tokens = tuple(self.title.split())
+        self.title_words = frozenset(self.title_tokens)
+        self.summary_words = frozenset(self.summary.split())
+        self._entity_codes = None
+
+    @property
+    def entity_codes(self) -> set[str]:
+        # Equivalent to _search_entity_codes(f"{title} {summary}").
+        if self._entity_codes is None:
+            combined = " ".join(part for part in (self.title, self.summary) if part)
+            self._entity_codes = _entity_codes_prepared(
+                combined,
+                self.title_compact + self.summary_compact,
+            )
+        return self._entity_codes
+
+
+_ARTICLE_FIELDS_CACHE = _LRUCache(SEARCH_ARTICLE_CACHE_SIZE)
+
+
+def _article_fields(article: Article) -> _ArticleSearchFields:
+    title = article.title or ""
+    summary = article.summary or ""
+    # The text hash is part of the key, so an edited article is re-processed.
+    key = (article.id, hash(title), hash(summary))
+    fields = _ARTICLE_FIELDS_CACHE.get(key)
+    if fields is None:
+        fields = _ArticleSearchFields(title, summary)
+        _ARTICLE_FIELDS_CACHE.set(key, fields)
+    return fields
+
+
+def _warm_search_cache() -> None:
+    """Pre-compute normalised search text for the newest articles.
+
+    Runs once in a background thread at startup so the first searches after a
+    Render deploy/restart do not pay the one-time HTML-cleaning cost.
+    """
+    try:
+        started = time.perf_counter()
+        with SessionLocal() as db:
+            rows = db.execute(
+                select(Article.id, Article.title, Article.summary)
+                .order_by(Article.published_at.desc().nullslast(), Article.id.desc())
+                .limit(SEARCH_ARTICLE_CACHE_SIZE)
+            ).all()
+        # Oldest first, so the newest articles end up most-recently-used in the LRU.
+        for index, (article_id, title, summary) in enumerate(reversed(rows), 1):
+            title = title or ""
+            summary = summary or ""
+            key = (article_id, hash(title), hash(summary))
+            if _ARTICLE_FIELDS_CACHE.get(key) is None:
+                _ARTICLE_FIELDS_CACHE.set(key, _ArticleSearchFields(title, summary))
+            if index % 200 == 0:
+                time.sleep(0.005)  # yield the GIL to request threads
+        print(f"[search-cache] warmed {len(rows)} articles in {time.perf_counter() - started:.1f}s", flush=True)
+    except Exception as exc:
+        print(f"[search-cache] warm-up skipped: {exc}", flush=True)
 
 
 EDUCATION_FILTER_TERMS = [
@@ -2756,46 +3056,46 @@ def _token_present(token: str, text: str) -> bool:
 # Lets users search Bengali news using Latin/English keyboard spelling:
 # "ami tumi bhat khabo", "patropatri", "chele meye", etc.
 _BENGLISH_PHRASE_ALIASES = {
-    "ami":["αªåαª«αª┐"], "aami":["αªåαª«αª┐"], "amra":["αªåαª«αª░αª╛"],
-    "tumi":["αªñαºüαª«αª┐"], "tomra":["αªñαºïαª«αª░αª╛"], "apni":["αªåαª¬αª¿αª┐"],
-    "bhat":["αª¡αª╛αªñ"], "bhaat":["αª¡αª╛αªñ"],
-    "khabo":["αªûαª╛αª¼αºï","αªûαª╛αª¼"], "khab":["αªûαª╛αª¼"], "khao":["αªûαª╛αªô"],
-    "khabe":["αªûαª╛αª¼αºç"], "kheye":["αªûαºçαºƒαºç","αªûαºçαª»αª╝αºç"],
-    "patropatri":["αª¬αª╛αªñαºìαª░αª¬αª╛αªñαºìαª░αºÇ"], "patro patri":["αª¬αª╛αªñαºìαª░αª¬αª╛αªñαºìαª░αºÇ"],
-    "patro":["αª¬αª╛αªñαºìαª░"], "patri":["αª¬αª╛αªñαºìαª░αºÇ"],
-    "chele":["αª¢αºçαª▓αºç"], "meye":["αª«αºçαºƒαºç","αª«αºçαª»αª╝αºç"],
-    "chele meye":["αª¢αºçαª▓αºç αª«αºçαºƒαºç","αª¢αºçαª▓αºç αª«αºçαª»αª╝αºç"],
-    "chelemeye":["αª¢αºçαª▓αºçαª«αºçαºƒαºç","αª¢αºçαª▓αºçαª«αºçαª»αª╝αºç"],
-    "biye":["αª¼αª┐αºƒαºç","αª¼αª┐αª»αª╝αºç"], "bibaho":["αª¼αª┐αª¼αª╛αª╣"],
-    "bhalobasha":["αª¡αª╛αª▓αºïαª¼αª╛αª╕αª╛"], "bhalobasa":["αª¡αª╛αª▓αºïαª¼αª╛αª╕αª╛"],
-    "poribar":["αª¬αª░αª┐αª¼αª╛αª░"], "shikkha":["αª╢αª┐αªòαºìαª╖αª╛"],
-    "school":["αª╕αºìαªòαºüαª▓"], "college":["αªòαª▓αºçαª£"],
-    "biswobidyaloy":["αª¼αª┐αª╢αºìαª¼αª¼αª┐αªªαºìαª»αª╛αª▓αºƒ","αª¼αª┐αª╢αºìαª¼αª¼αª┐αªªαºìαª»αª╛αª▓αª»αª╝"],
-    "bishwabidyaloy":["αª¼αª┐αª╢αºìαª¼αª¼αª┐αªªαºìαª»αª╛αª▓αºƒ","αª¼αª┐αª╢αºìαª¼αª¼αª┐αªªαºìαª»αª╛αª▓αª»αª╝"],
-    "chakri":["αªÜαª╛αªòαª░αª┐"], "kaj":["αªòαª╛αª£"], "bari":["αª¼αª╛αº£αª┐","αª¼αª╛αªíαª╝αª┐"],
-    "ghor":["αªÿαª░"], "manush":["αª«αª╛αª¿αºüαª╖"], "lok":["αª▓αºïαªò"],
-    "meyeder":["αª«αºçαºƒαºçαªªαºçαª░","αª«αºçαª»αª╝αºçαªªαºçαª░"], "cheleder":["αª¢αºçαª▓αºçαªªαºçαª░"],
-    "kothay":["αªòαºïαªÑαª╛αºƒ","αªòαºïαªÑαª╛αª»αª╝"], "ki":["αªòαª┐"], "keno":["αªòαºçαª¿"],
-    "kobe":["αªòαª¼αºç"], "kemon":["αªòαºçαª«αª¿"], "kivabe":["αªòαª┐αª¡αª╛αª¼αºç","αªòαºÇαª¡αª╛αª¼αºç"],
-    "ki bhabe":["αªòαª┐ αª¡αª╛αª¼αºç","αªòαºÇαª¡αª╛αª¼αºç"], "khobor":["αªûαª¼αª░"],
-    "aj":["αªåαª£"], "aaj":["αªåαª£"], "kal":["αªòαª╛αª▓"],
-    "bangla":["αª¼αª╛αªéαª▓αª╛"], "banglay":["αª¼αª╛αªéαª▓αª╛αºƒ","αª¼αª╛αªéαª▓αª╛αª»αª╝"],
-    "kolkata":["αªòαª▓αªòαª╛αªñαª╛"], "west bengal":["αª¬αª╢αºìαªÜαª┐αª«αª¼αªÖαºìαªù"],
+    "ami":["আমি"], "aami":["আমি"], "amra":["আমরা"],
+    "tumi":["তুমি"], "tomra":["তোমরা"], "apni":["আপনি"],
+    "bhat":["ভাত"], "bhaat":["ভাত"],
+    "khabo":["খাবো","খাব"], "khab":["খাব"], "khao":["খাও"],
+    "khabe":["খাবে"], "kheye":["খেয়ে","খেয়ে"],
+    "patropatri":["পাত্রপাত্রী"], "patro patri":["পাত্রপাত্রী"],
+    "patro":["পাত্র"], "patri":["পাত্রী"],
+    "chele":["ছেলে"], "meye":["মেয়ে","মেয়ে"],
+    "chele meye":["ছেলে মেয়ে","ছেলে মেয়ে"],
+    "chelemeye":["ছেলেমেয়ে","ছেলেমেয়ে"],
+    "biye":["বিয়ে","বিয়ে"], "bibaho":["বিবাহ"],
+    "bhalobasha":["ভালোবাসা"], "bhalobasa":["ভালোবাসা"],
+    "poribar":["পরিবার"], "shikkha":["শিক্ষা"],
+    "school":["স্কুল"], "college":["কলেজ"],
+    "biswobidyaloy":["বিশ্ববিদ্যালয়","বিশ্ববিদ্যালয়"],
+    "bishwabidyaloy":["বিশ্ববিদ্যালয়","বিশ্ববিদ্যালয়"],
+    "chakri":["চাকরি"], "kaj":["কাজ"], "bari":["বাড়ি","বাড়ি"],
+    "ghor":["ঘর"], "manush":["মানুষ"], "lok":["লোক"],
+    "meyeder":["মেয়েদের","মেয়েদের"], "cheleder":["ছেলেদের"],
+    "kothay":["কোথায়","কোথায়"], "ki":["কি"], "keno":["কেন"],
+    "kobe":["কবে"], "kemon":["কেমন"], "kivabe":["কিভাবে","কীভাবে"],
+    "ki bhabe":["কি ভাবে","কীভাবে"], "khobor":["খবর"],
+    "aj":["আজ"], "aaj":["আজ"], "kal":["কাল"],
+    "bangla":["বাংলা"], "banglay":["বাংলায়","বাংলায়"],
+    "kolkata":["কলকাতা"], "west bengal":["পশ্চিমবঙ্গ"],
 }
 
 _BENGLISH_MULTI = [
-    ("ksh","αªòαºìαª╖"),("ng","αªé"),("nj","αª₧αºìαª£"),("nc","αª₧αºìαªÜ"),("chh","αª¢"),
-    ("jh","αª¥"),("kh","αªû"),("gh","αªÿ"),("th","αªÑ"),("dh","αªº"),
-    ("ph","αª½"),("bh","αª¡"),("sh","αª╢"),("ch","αªÜ"),("tr","αªñαºìαª░"),
-    ("dr","αªªαºìαª░"),("pr","αª¬αºìαª░"),("br","αª¼αºìαª░"),("kr","αªòαºìαª░"),("gr","αªùαºìαª░"),
-    ("st","αª╕αºìαªƒ"),("sk","αª╕αºìαªò"),("sp","αª╕αºìαª¬"),("sm","αª╕αºìαª«"),("sw","αª╕αºìαª¼"),
+    ("ksh","ক্ষ"),("ng","ং"),("nj","ঞ্জ"),("nc","ঞ্চ"),("chh","ছ"),
+    ("jh","ঝ"),("kh","খ"),("gh","ঘ"),("th","থ"),("dh","ধ"),
+    ("ph","ফ"),("bh","ভ"),("sh","শ"),("ch","চ"),("tr","ত্র"),
+    ("dr","দ্র"),("pr","প্র"),("br","ব্র"),("kr","ক্র"),("gr","গ্র"),
+    ("st","স্ট"),("sk","স্ক"),("sp","স্প"),("sm","স্ম"),("sw","স্ব"),
 ]
 _BENGLISH_C = {
-    "k":"αªò","g":"αªù","c":"αªò","j":"αª£","t":"αªñ","d":"αªª","n":"αª¿",
-    "p":"αª¬","b":"αª¼","m":"αª«","y":"αª»","r":"αª░","l":"αª▓","s":"αª╕",
-    "h":"αª╣","v":"αª¡","w":"αªô","f":"αª½","q":"αªò","x":"αªòαºìαª╕","z":"αª£",
+    "k":"ক","g":"গ","c":"ক","j":"জ","t":"ত","d":"দ","n":"ন",
+    "p":"প","b":"ব","m":"ম","y":"য","r":"র","l":"ল","s":"স",
+    "h":"হ","v":"ভ","w":"ও","f":"ফ","q":"ক","x":"ক্স","z":"জ",
 }
-_BENGLISH_V = {"a":"αª╛","i":"αª┐","u":"αºü","e":"αºç","o":"αºï"}
+_BENGLISH_V = {"a":"া","i":"ি","u":"ু","e":"ে","o":"ো"}
 
 def _benglish_phonetic_word(word: str) -> str:
     w = re.sub(r"[^a-z]", "", str(word or "").lower())
@@ -2811,14 +3111,14 @@ def _benglish_phonetic_word(word: str) -> str:
         if hit:
             out.append(hit[1]); i+=len(hit[0]); pending=True; continue
         if w.startswith("aa",i):
-            out.append("αª╛" if pending else "αªå"); i+=2; pending=False; continue
+            out.append("া" if pending else "আ"); i+=2; pending=False; continue
         if w.startswith(("ee","ii"),i):
-            out.append("αºÇ" if pending else "αªê"); i+=2; pending=False; continue
+            out.append("ী" if pending else "ঈ"); i+=2; pending=False; continue
         if w.startswith(("oo","uu"),i):
-            out.append("αºé" if pending else "αªè"); i+=2; pending=False; continue
+            out.append("ূ" if pending else "ঊ"); i+=2; pending=False; continue
         ch=w[i]
         if ch in _BENGLISH_V:
-            out.append(_BENGLISH_V[ch] if pending else {"a":"αªà","i":"αªç","u":"αªë","e":"αªÅ","o":"αªô"}[ch])
+            out.append(_BENGLISH_V[ch] if pending else {"a":"অ","i":"ই","u":"উ","e":"এ","o":"ও"}[ch])
             pending=False
         elif ch in _BENGLISH_C:
             out.append(_BENGLISH_C[ch]); pending=True
@@ -2827,9 +3127,10 @@ def _benglish_phonetic_word(word: str) -> str:
         i+=1
     return "".join(out)
 
-def _benglish_search_variants(query: str) -> list[str]:
+@lru_cache(maxsize=2048)
+def _benglish_search_variants_cached(query: str) -> tuple:
     q=re.sub(r"\s+"," ",str(query or "").strip().lower())
-    if not q or re.search(r"[\u0980-\u09ff]",q): return []
+    if not q or re.search(r"[\u0980-\u09ff]",q): return ()
     variants=[]
     if q in _BENGLISH_PHRASE_ALIASES:
         variants.extend(_BENGLISH_PHRASE_ALIASES[q])
@@ -2846,7 +3147,11 @@ def _benglish_search_variants(query: str) -> list[str]:
     compact=q.replace(" ","")
     if compact:
         variants.append(_benglish_phonetic_word(compact))
-    return list(dict.fromkeys(v for v in variants if v and v!=q))
+    return tuple(dict.fromkeys(v for v in variants if v and v!=q))
+
+
+def _benglish_search_variants(query: str) -> list[str]:
+    return list(_benglish_search_variants_cached(str(query or "")))
 
 
 SEARCH_CONCEPT_ALIASES = {
@@ -2900,6 +3205,16 @@ SEARCH_CONCEPT_ALIASES = {
     },
 }
 
+# Normalised once at import time instead of on every call.
+_SEARCH_CONCEPT_TABLE = tuple(
+    (
+        _normalise_search(canonical),
+        frozenset(_normalise_search(v) for v in values),
+    )
+    for canonical, values in SEARCH_CONCEPT_ALIASES.items()
+)
+
+
 def _search_concept_aliases(query: str) -> set[str]:
     """Return normalized aliases/concepts relevant to the user's query."""
     q = _normalise_search(query)
@@ -2907,15 +3222,35 @@ def _search_concept_aliases(query: str) -> set[str]:
         return set()
 
     aliases = set()
-    for canonical, values in SEARCH_CONCEPT_ALIASES.items():
-        canonical_n = _normalise_search(canonical)
-        value_norms = {_normalise_search(v) for v in values}
+    for canonical_n, value_norms in _SEARCH_CONCEPT_TABLE:
         if canonical_n in q or any(v and v in q for v in value_norms):
             aliases.add(canonical_n)
             aliases.update(v for v in value_norms if v)
 
     aliases.add(q)
     return aliases
+
+
+def _prepare_concept(concept: str) -> tuple:
+    """Pre-normalise a concept once per search request (not once per article)."""
+    concept_n = _normalise_search(concept)
+    compact_concept = _compact_search(concept)
+    tokens = [t for t in concept_n.split() if t not in SEARCH_STOP_WORDS]
+    return (concept_n, compact_concept, tuple(_token_variants(t) for t in tokens))
+
+
+def _concept_matches(text_n: str, compact_text: str, words, prepared_concept: tuple) -> bool:
+    """Match a prepared concept by exact phrase, compact acronym, or token coverage."""
+    concept_n, compact_concept, token_variant_sets = prepared_concept
+    if not text_n or not concept_n:
+        return False
+    if concept_n in text_n:
+        return True
+    if compact_concept and len(compact_concept) >= 3 and compact_concept in compact_text:
+        return True
+    if not token_variant_sets:
+        return False
+    return all(not words.isdisjoint(variants) for variants in token_variant_sets)
 
 
 def _search_text_has_concept_prepared(
@@ -2925,63 +3260,39 @@ def _search_text_has_concept_prepared(
     concept: str,
 ) -> bool:
     """Match a concept using already-prepared article text."""
-    concept_n = _normalise_search(concept)
-    if not text_n or not concept_n:
-        return False
-
-    if concept_n in text_n:
-        return True
-
-    compact_concept = _compact_search(concept)
-    if compact_concept and len(compact_concept) >= 3 and compact_concept in compact_text:
-        return True
-
-    tokens = [t for t in concept_n.split() if t not in SEARCH_STOP_WORDS]
-    if not tokens:
-        return False
-
-    return all(
-        bool(words.intersection(_token_variants(token)))
-        for token in tokens
-    )
+    return _concept_matches(text_n, compact_text, words, _prepare_concept(concept))
 
 
 def _search_text_has_concept(text: str, concept: str) -> bool:
     """Match a concept by exact phrase, compact acronym, or token coverage."""
     text_n = _normalise_search(text)
-    concept_n = _normalise_search(concept)
-    if not text_n or not concept_n:
-        return False
-
-    if concept_n in text_n:
-        return True
-
-    compact_text = _compact_search(text)
-    compact_concept = _compact_search(concept)
-    if compact_concept and len(compact_concept) >= 3 and compact_concept in compact_text:
-        return True
-
-    tokens = [t for t in concept_n.split() if t not in SEARCH_STOP_WORDS]
-    if not tokens:
-        return False
-
-    words = set(text_n.split())
-    return all(
-        bool(words.intersection(_token_variants(token)))
-        for token in tokens
+    return _concept_matches(
+        text_n,
+        _compact_search(text),
+        set(text_n.split()),
+        _prepare_concept(concept),
     )
 
 
 def _prepare_search_context(query: str) -> dict:
     """Precompute query-only search signals once per search request."""
+    q_phrase = _normalise_search(query)
+    q_tokens = _query_tokens(query)
+    aliases = _search_concept_aliases(query)
+    benglish_variants = _benglish_search_variants(query)
     return {
-        "q": _normalise_search(query),
+        "q": q_phrase,
         "q_compact": _compact_search(query),
-        "q_tokens": _query_tokens(query),
-        "q_phrase": _normalise_search(query),
-        "aliases": _search_concept_aliases(query),
-        "benglish_variants": _benglish_search_variants(query),
+        "q_tokens": q_tokens,
+        "q_phrase": q_phrase,
+        "aliases": aliases,
+        "benglish_variants": benglish_variants,
         "entity_codes": _search_entity_codes(query),
+        # Prepared once so the per-article loop does no query normalisation.
+        "q_token_variants": [_token_variants(t) for t in q_tokens],
+        "alias_concepts": [_prepare_concept(a) for a in aliases if a != q_phrase],
+        "benglish_concepts": [_prepare_concept(v) for v in benglish_variants],
+        "benglish_pairs": [(v, _compact_search(v)) for v in benglish_variants],
     }
 
 
@@ -2990,90 +3301,62 @@ def _search_match_profile(
     article: Article,
     source: Source,
     search_context: dict | None = None,
+    fields: Optional["_ArticleSearchFields"] = None,
 ) -> dict:
     """Produce explainable field-level relevance signals for one article."""
-    title = _normalise_search(article.title)
-    summary = _normalise_search(article.summary)
-    title_compact = _compact_search(article.title)
-    summary_compact = _compact_search(article.summary)
-    category = _normalise_search(article.category)
-    source_name = _normalise_search(source.name)
-
-    title_words = set(title.split())
-    summary_words = set(summary.split())
-
     context = search_context or _prepare_search_context(query)
+    f = fields or _article_fields(article)
+
+    title = f.title
+    summary = f.summary
+    title_compact = f.title_compact
+    summary_compact = f.summary_compact
+    title_words = f.title_words
+    summary_words = f.summary_words
+    category = _normalise_short(article.category)
+    source_name = _normalise_short(source.name)
+    category_words = frozenset(category.split())
+    source_words = frozenset(source_name.split())
+
     q_tokens = context["q_tokens"]
     q_phrase = context["q_phrase"]
-    aliases = context["aliases"]
-    benglish_variants = context["benglish_variants"]
+    token_variants = context["q_token_variants"]
 
-    title_hits = sum(1 for t in q_tokens if _token_present(t, title))
-    summary_hits = sum(1 for t in q_tokens if _token_present(t, summary))
-    category_hits = sum(1 for t in q_tokens if _token_present(t, category))
-    source_hits = sum(1 for t in q_tokens if _token_present(t, source_name))
+    title_hits = sum(1 for v in token_variants if not title_words.isdisjoint(v))
+    summary_hits = sum(1 for v in token_variants if not summary_words.isdisjoint(v))
+    category_hits = sum(1 for v in token_variants if not category_words.isdisjoint(v))
+    source_hits = sum(1 for v in token_variants if not source_words.isdisjoint(v))
 
     exact_title = bool(q_phrase and q_phrase in title)
     exact_summary = bool(q_phrase and q_phrase in summary)
 
+    alias_concepts = context["alias_concepts"]
     alias_title = any(
-        a != q_phrase
-        and _search_text_has_concept_prepared(
-            title,
-            title_compact,
-            title_words,
-            a,
-        )
-        for a in aliases
+        _concept_matches(title, title_compact, title_words, pc)
+        for pc in alias_concepts
     )
     alias_summary = any(
-        a != q_phrase
-        and _search_text_has_concept_prepared(
-            summary,
-            summary_compact,
-            summary_words,
-            a,
-        )
-        for a in aliases
+        _concept_matches(summary, summary_compact, summary_words, pc)
+        for pc in alias_concepts
     )
 
+    benglish_pairs = context["benglish_pairs"]
+    benglish_concepts = context["benglish_concepts"]
     benglish_title = any(
-        v in title or _compact_search(v) in title_compact
-        for v in benglish_variants
+        v in title or vc in title_compact
+        for v, vc in benglish_pairs
     )
     benglish_summary = any(
-        v in summary or _compact_search(v) in summary_compact
-        for v in benglish_variants
+        v in summary or vc in summary_compact
+        for v, vc in benglish_pairs
     )
-    benglish_title_hits = max(
-        [
-            sum(
-                1
-                for v in benglish_variants
-                if _search_text_has_concept_prepared(
-                    title,
-                    title_compact,
-                    title_words,
-                    v,
-                )
-            ),
-            0,
-        ]
+    benglish_title_hits = sum(
+        1 for pc in benglish_concepts
+        if _concept_matches(title, title_compact, title_words, pc)
     )
-    benglish_summary_hits = max(
-        [
-            sum(
-                1
-                for v in benglish_variants
-                if _search_text_has_concept_prepared(
-                    summary,
-                    summary_compact,
-                    summary_words,
-                    v,
-                )
-            ),
-            0,
-        ]
+    benglish_summary_hits = sum(
+        1 for pc in benglish_concepts
+        if _concept_matches(summary, summary_compact, summary_words, pc)
     )
 
     return {
@@ -3112,16 +3395,18 @@ def _score_search_result(
 
     Fuzzy matching is deliberately weak and only activates after meaningful
     lexical evidence exists, preventing unrelated articles from floating up.
+
+    Scoring rules are unchanged; only repeated normalisation work was removed.
     """
     context = search_context or _prepare_search_context(query)
     q = context["q"]
     q_compact = context["q_compact"]
     q_tokens = context["q_tokens"]
 
-    title = _normalise_search(article.title)
-    summary = _normalise_search(article.summary)
-    title_compact = _compact_search(article.title)
-    summary_compact = _compact_search(article.summary)
+    f = _article_fields(article)
+    title = f.title
+    title_compact = f.title_compact
+    summary_compact = f.summary_compact
 
     score = 0.0
 
@@ -3130,10 +3415,7 @@ def _score_search_result(
     if requested_entity_codes is None:
         requested_entity_codes = _search_entity_codes(query)
     if requested_entity_codes:
-        result_entity_codes = _search_entity_codes(
-            f"{article.title or ''} {article.summary or ''}"
-        )
-        if not requested_entity_codes.intersection(result_entity_codes):
+        if not requested_entity_codes.intersection(f.entity_codes):
             return -1.0
         score += 4000
 
@@ -3141,7 +3423,8 @@ def _score_search_result(
         query,
         article,
         source,
-        search_context=search_context,
+        search_context=context,
+        fields=f,
     )
 
     short_identifier = (
@@ -3193,8 +3476,6 @@ def _score_search_result(
             score += 750
 
     # Binglish -> Bengali phonetic/concept match.
-    # Bengali title matches receive the strongest boost; summary matches remain
-    # useful but cannot overpower a strong exact title match.
     if benglish_match:
         score += 2100
         if profile["benglish_title"]:
@@ -3215,41 +3496,42 @@ def _score_search_result(
     score += profile["summary_hits"] * 55
 
     # TITLE PROXIMITY.
-    title_words = title.split()
+    title_words = f.title_tokens
     if len(q_tokens) >= 2 and title_words:
-        normalized_q = [_normalise_search(t) for t in q_tokens]
+        variant_sets = context["q_token_variants"]
+        q_len = len(variant_sets)
         best_window = 999
 
         for i, word in enumerate(title_words):
-            if not _token_present(normalized_q[0], word):
+            if word not in variant_sets[0]:
                 continue
 
             matched = 1
-            for j in range(1, len(normalized_q)):
+            for j in range(1, q_len):
                 if i + j >= len(title_words):
                     break
-                if _token_present(normalized_q[j], title_words[i + j]):
+                if title_words[i + j] in variant_sets[j]:
                     matched += 1
                 else:
                     break
 
-            if matched == len(normalized_q):
-                best_window = len(normalized_q)
+            if matched == q_len:
+                best_window = q_len
                 break
 
-            window_end = min(len(title_words), i + len(normalized_q) + 4)
+            window_end = min(len(title_words), i + q_len + 4)
             window = title_words[i:window_end]
             hits = sum(
-                1 for qt in normalized_q
-                if any(_token_present(qt, w) for w in window)
+                1 for variants in variant_sets
+                if not variants.isdisjoint(window)
             )
-            if hits >= max(2, len(normalized_q) - 1):
+            if hits >= max(2, q_len - 1):
                 best_window = min(best_window, len(window))
 
         if best_window < 999:
             score += max(
                 120,
-                520 - max(0, best_window - len(normalized_q)) * 80
+                520 - max(0, best_window - q_len) * 80
             )
 
     # TYPO TOLERANCE ONLY AFTER STRONG MATCH EVIDENCE.
@@ -3346,7 +3628,7 @@ def _add_suggestion(bucket: dict, text: str, score: float, kind: str = "query", 
     cleaned = _clean_search_text(text)
     if not cleaned:
         return
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -ΓÇôΓÇö")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—")
     if len(cleaned) < 2 or len(cleaned) > 140:
         return
     key = _normalise_search(cleaned)
@@ -3633,9 +3915,7 @@ def search_diagnostic(
             .limit(5000)
         ).all()
         for article, _source_row in entity_rows:
-            article_codes = _search_entity_codes(
-                f"{article.title or ''} {article.summary or ''}"
-            )
+            article_codes = _article_fields(article).entity_codes
             if set(entity_codes).intersection(article_codes):
                 entity_matches += 1
 
@@ -3744,37 +4024,42 @@ def search(
 
     is_subscriber = bool(subscriber)
 
+    # Read once per request (previously up to 4 identical queries).
+    free_limit = get_free_search_limit(db)
+
     # A normal search that would exceed the free allowance is blocked.
     # Filter-only refreshes are allowed without consuming quota because the
     # user is refining an already executed search.
     if (
         not filter_only
         and not is_subscriber
-        and usage.searches_used >= get_free_search_limit(db)
+        and usage.searches_used >= free_limit
     ):
         raise HTTPException(
             status_code=402,
             detail={
                 "message": "Free search limit reached.",
-                "free_limit": get_free_search_limit(db),
+                "free_limit": free_limit,
                 "searches_used": usage.searches_used,
                 "remaining": 0,
             },
         )
 
-    query_text = _normalise_search(q)
-    tokens = _query_tokens(q)
+    # Prepare query-only ranking signals once and reuse them everywhere.
+    search_context = _prepare_search_context(q)
+    query_text = search_context["q"]
+    tokens = search_context["q_tokens"]
 
     if not query_text:
         return {
             "status": "success",
             "query": q,
             "count": 0,
-            "free_limit": get_free_search_limit(db),
+            "free_limit": free_limit,
             "searches_used": usage.searches_used,
             "remaining": (
                 None if is_subscriber
-                else max(0, get_free_search_limit(db) - usage.searches_used)
+                else max(0, free_limit - usage.searches_used)
             ),
             "subscribed": is_subscriber,
             "results": [],
@@ -3807,14 +4092,25 @@ def search(
             Article.summary.ilike(pattern),
             Article.category.ilike(pattern),
         ])
+    # Binglish: also retrieve Bengali-script articles through the phonetic
+    # variants (e.g. "kolkata" -> "কলকাতা"). This was removed in 547ef1e
+    # to save SQL time; with the pg_trgm indexes it is cheap again. The ranker
+    # still decides whether each candidate is genuinely relevant.
+    for bengali_variant in search_context["benglish_variants"]:
+        if len(bengali_variant) >= 2:
+            pattern = f"%{bengali_variant}%"
+            token_conditions.extend([
+                Article.title.ilike(pattern),
+                Article.summary.ilike(pattern),
+            ])
+
     # IIT campus identifiers need special candidate retrieval. For example,
     # "IIT-M" normalises to tokens ["iit", "m"], but a real article is
     # normally titled "IIT Madras", so requiring the literal token "m" in SQL
     # incorrectly eliminates the correct article before _iit_campus_codes()
     # gets a chance to resolve the alias. Retrieve IIT articles broadly and
     # apply the canonical campus gate below.
-    requested_iit_codes = _iit_campus_codes(q)
-    requested_entity_codes = _search_entity_codes(q)
+    requested_entity_codes = search_context["entity_codes"]
     if requested_entity_codes:
         # Entity aliases such as IIT-M / IIM-A need broad candidate retrieval;
         # the exact campus identity is enforced after SQL retrieval.
@@ -3834,7 +4130,7 @@ def search(
         strict_identifier = (
             len(tokens) >= 2
             and all(len(t) <= 4 for t in tokens)
-            and len(_compact_search(q)) <= 12
+            and len(search_context["q_compact"]) <= 12
         )
         if strict_identifier:
             identifier_conditions = []
@@ -3902,12 +4198,67 @@ def search(
         if category_conditions:
             search_conditions.append(or_(*category_conditions))
 
-    rows = db.execute(
+    candidate_query = (
         select(Article, Source)
         .join(Source, Article.source_id == Source.id)
-        .where(*search_conditions)
-        .limit(800)
-    ).all()
+    )
+    # Newest candidates first. Without ORDER BY, PostgreSQL returned an
+    # arbitrary 800 matches (usually the oldest rows) for common words.
+    # Served by ix_articles_published_at_desc + the pg_trgm indexes.
+    candidate_order = (
+        Article.published_at.desc().nullslast(),
+        Article.id.desc(),
+    )
+
+    multi_word_or = (
+        not requested_entity_codes
+        and not strict_identifier
+        and len([t for t in retrieval_terms if len(t) >= 2]) >= 2
+    )
+
+    if multi_word_or:
+        # Stage 1: rows containing EVERY query word. The ranker's hard gate
+        # requires all words of a multi-word query, so these are the real
+        # candidates. Previously a common word (e.g. "university") filled the
+        # 800-row cap and pushed out rows containing the rarer word
+        # (e.g. "jadavpur"). PostgreSQL answers this with a BitmapAnd of the
+        # trigram indexes, so it is fast and selective.
+        all_words_condition = and_(*[
+            or_(
+                Article.title.ilike(f"%{token}%"),
+                Article.summary.ilike(f"%{token}%"),
+                Article.category.ilike(f"%{token}%"),
+            )
+            for token in retrieval_terms
+            if len(token) >= 2
+        ])
+        rows = db.execute(
+            candidate_query
+            .where(all_words_condition, *search_conditions[1:])
+            .order_by(*candidate_order)
+            .limit(SEARCH_CANDIDATE_LIMIT)
+        ).all()
+
+        # Stage 2: top up with the original any-word retrieval, so concept /
+        # abbreviation / Binglish matches that the ranker accepts are kept.
+        if len(rows) < SEARCH_CANDIDATE_LIMIT:
+            seen_ids = [article.id for article, _source_row in rows]
+            rows += db.execute(
+                candidate_query
+                .where(
+                    *search_conditions,
+                    *([Article.id.not_in(seen_ids)] if seen_ids else []),
+                )
+                .order_by(*candidate_order)
+                .limit(SEARCH_CANDIDATE_LIMIT - len(rows))
+            ).all()
+    else:
+        rows = db.execute(
+            candidate_query
+            .where(*search_conditions)
+            .order_by(*candidate_order)
+            .limit(SEARCH_CANDIDATE_LIMIT)
+        ).all()
 
     # Campus-aware hard gate. SQL token matching intentionally remains broad
     # for performance, but an IIT campus identifier must resolve to the same
@@ -3915,16 +4266,11 @@ def search(
     # "IIT-B" from returning "IIT-M" simply because both contain "IIT".
     # Reuse the query-level entity codes already calculated above.
     if requested_entity_codes:
-        filtered_rows = []
-        for article, source_row in rows:
-            article_text = f"{article.title or ''} {article.summary or ''}"
-            article_entity_codes = _search_entity_codes(article_text)
-            if requested_entity_codes.intersection(article_entity_codes):
-                filtered_rows.append((article, source_row))
-        rows = filtered_rows
-
-    # Prepare query-only ranking signals once and reuse them for every article.
-    search_context = _prepare_search_context(q)
+        rows = [
+            (article, source_row)
+            for article, source_row in rows
+            if requested_entity_codes.intersection(_article_fields(article).entity_codes)
+        ]
 
     ranked_rows = [
         (
@@ -3955,7 +4301,7 @@ def search(
 
     for item in ranked_rows:
         score, article, source_row = item
-        title_key = _normalise_search(article.title or "")
+        title_key = _article_fields(article).title
         title_key = re.sub(
             r"\b(update|breaking|live|latest)\b",
             " ",
@@ -4005,59 +4351,66 @@ def search(
         if result_count > 0 and not is_subscriber:
             usage.searches_used += 1
 
+    # Serialise the response BEFORE commit. db.commit() expires every ORM
+    # object, so reading article/source attributes afterwards re-SELECTed each
+    # of the 50 articles and their sources one by one (~88 extra queries per
+    # search, each paying the full network round trip to Render PostgreSQL).
+    searches_used = usage.searches_used
+    results_payload = [
+        {
+            "id": article.id,
+            "relevance_score": round(score, 2),
+            "is_most_relevant": bool(
+                top_score is not None and score == top_score
+            ),
+            "relevance_label": (
+                "Most relevant"
+                if top_score is not None and score == top_score
+                else "Relevant"
+            ),
+            "title": article.title,
+            "url": article.url,
+            "image_url": article.image_url,
+            "summary": article.summary,
+            "category": article.category,
+            "language": article.language,
+            "published_at": article.published_at,
+            "source": source_row.name,
+            "source_website": source_row.website,
+        }
+        for score, article, source_row in ranked_rows
+    ]
+
     db.commit()
 
     remaining = max(
         0,
-        get_free_search_limit(db) - usage.searches_used,
+        free_limit - searches_used,
     )
 
     return {
         "status": "success",
         "query": q,
         "count": result_count,
-        "free_limit": get_free_search_limit(db),
-        "searches_used": usage.searches_used,
+        "free_limit": free_limit,
+        "searches_used": searches_used,
         "remaining": (
             None if is_subscriber else remaining
         ),
         "subscribed": is_subscriber,
         "search_language_mode": (
-            "Binglish ΓåÆ Bengali"
-            if _benglish_search_variants(q)
-            else ("Bengali" if re.search(r"[αªÇ-αº┐]", q) else "English / Mixed")
+            "Binglish → Bengali"
+            if search_context["benglish_variants"]
+            else ("Bengali" if re.search(r"[ঀ-৿]", q) else "English / Mixed")
         ),
-        "search_variants": _benglish_search_variants(q)[:8],
+        "search_variants": search_context["benglish_variants"][:8],
         "filters": {
             "date_range": date_range,
             "categories": selected_categories,
             "language": language.strip(),
             "source": source.strip(),
         },
-        "results": [
-            {
-                "id": article.id,
-                "relevance_score": round(score, 2),
-                "is_most_relevant": bool(
-                    top_score is not None and score == top_score
-                ),
-                "relevance_label": (
-                    "Most relevant"
-                    if top_score is not None and score == top_score
-                    else "Relevant"
-                ),
-                "title": article.title,
-                "url": article.url,
-                "image_url": article.image_url,
-                "summary": article.summary,
-                "category": article.category,
-                "language": article.language,
-                "published_at": article.published_at,
-                "source": source_row.name,
-                "source_website": source_row.website,
-            }
-            for score, article, source_row in ranked_rows
-        ],
+        "results": results_payload,
     }
 
 
@@ -4596,13 +4949,13 @@ def generate_briefing(x_user_key:str=Header(alias="X-User-Key"),x_auth_token:Opt
     cutoff=datetime.now(timezone.utc)-timedelta(hours=24)
     rows=db.execute(select(Article,Source).join(Source,Article.source_id==Source.id).where(Article.published_at>=cutoff).order_by(Article.published_at.desc()).limit(25)).all()
     lines=[]
-    for i,(a,sr) in enumerate(rows[:10],1): lines.append(f"{i}. {a.title} ΓÇö {sr.name}. {_intel_summary(a)}")
+    for i,(a,sr) in enumerate(rows[:10],1): lines.append(f"{i}. {a.title} — {sr.name}. {_intel_summary(a)}")
     body="\n".join(lines) if lines else "No new indexed articles were found in the last 24 hours."
     b=Briefing(user_key=user,briefing_date=date_key,title="Daily Media Intelligence Briefing",body=body,article_count=len(rows)); db.add(b); db.commit(); db.refresh(b); return {"id":b.id,"title":b.title,"body":b.body,"article_count":b.article_count,"generated_at":b.generated_at}
 
 
 # =========================================================
-# ADMIN ΓÇö ePAPER AUTO-DISCOVERY
+# ADMIN — ePAPER AUTO-DISCOVERY
 # =========================================================
 
 @app.get("/api/admin/epaper/publishers")
@@ -6369,7 +6722,7 @@ def get_feed(
     }
 
 # =========================================================
-# ADMIN ΓÇö AUTOMATIC GLOBAL RSS DISCOVERY
+# ADMIN — AUTOMATIC GLOBAL RSS DISCOVERY
 # =========================================================
 
 @app.get("/api/admin/settings/auto-rss-discovery")
