@@ -272,8 +272,34 @@ async function refreshQuota(){
    GOOGLE-STYLE SEARCH AUTOCOMPLETE
    ========================================================= */
 
-const suggestionBox =
+/* The autocomplete serves two search boxes: the hero search (#searchInput)
+   and the frozen results search bar (#amiSearchResultsDockInput), which
+   index.html clones into #amiSearchResultsDock after a search. All functions
+   below work on the currently active input + dropdown pair. */
+const heroSuggestionBox =
     document.getElementById("searchSuggestions");
+let suggestionBox = heroSuggestionBox;
+let suggestionInput = null;
+
+function activeSuggestionInput(){
+    return suggestionInput || searchInput;
+}
+
+function useSuggestionTarget(input, box){
+    if(suggestionInput === input && suggestionBox === box) return;
+    // Close the dropdown of the previously used search box.
+    if(suggestionBox && suggestionBox !== box){
+        suggestionBox.classList.remove("show");
+        suggestionBox.innerHTML = "";
+    }
+    if(suggestionInput && suggestionInput !== input){
+        suggestionInput.setAttribute("aria-expanded", "false");
+        suggestionInput.removeAttribute("aria-activedescendant");
+    }
+    suggestionInput = input;
+    suggestionBox = box;
+    suggestionIndex = -1;
+}
 
 let suggestionTimer = null;
 let suggestionController = null;
@@ -313,7 +339,7 @@ function hideSuggestions(){
     suggestionBox.classList.remove("show");
     suggestionBox.innerHTML = "";
     suggestionIndex = -1;
-    searchInput.setAttribute("aria-expanded", "false");
+    activeSuggestionInput().setAttribute("aria-expanded", "false");
 }
 
 function setActiveSuggestion(index){
@@ -327,18 +353,20 @@ function setActiveSuggestion(index){
     });
     if(suggestionIndex >= 0){
         const active = items[suggestionIndex];
-        searchInput.setAttribute("aria-activedescendant", active.id);
+        activeSuggestionInput().setAttribute("aria-activedescendant", active.id);
         active.scrollIntoView({block:"nearest"});
     } else {
-        searchInput.removeAttribute("aria-activedescendant");
+        activeSuggestionInput().removeAttribute("aria-activedescendant");
     }
 }
 
 async function selectSearchSuggestion(value){
     const selected = String(value || "").trim();
     if(!selected) return;
+    const typedInput = activeSuggestionInput();
     searchInput.value = selected;
-    searchInput.setSelectionRange(selected.length, selected.length);
+    frozenSearchInputs().forEach(function(input){ input.value = selected; });
+    typedInput.setSelectionRange(selected.length, selected.length);
     hideSuggestions();
     await performSearch(selected);
 }
@@ -365,8 +393,8 @@ function showSuggestions(items, query){
 
     suggestionIndex = -1;
     suggestionBox.classList.add("show");
-    searchInput.setAttribute("aria-expanded", "true");
-    searchInput.removeAttribute("aria-activedescendant");
+    activeSuggestionInput().setAttribute("aria-expanded", "true");
+    activeSuggestionInput().removeAttribute("aria-activedescendant");
 
     suggestionBox.querySelectorAll(".search-suggestion").forEach(button => {
         button.addEventListener("mouseenter", () => {
@@ -403,14 +431,18 @@ async function loadSuggestions(query){
 
 const searchInput = document.getElementById("searchInput");
 
-searchInput.addEventListener("input", function(){
+function bindSearchAutocomplete(input, box){
+
+input.addEventListener("input", function(){
+    useSuggestionTarget(input, box);
     const value = this.value.trim();
     clearTimeout(suggestionTimer);
     if(!value){ hideSuggestions(); return; }
     suggestionTimer = setTimeout(() => loadSuggestions(value), 180);
 });
 
-searchInput.addEventListener("keydown", async function(event){
+input.addEventListener("keydown", async function(event){
+    useSuggestionTarget(input, box);
     const items = suggestionBox.querySelectorAll(".search-suggestion");
     const open = suggestionBox.classList.contains("show") && items.length;
 
@@ -461,9 +493,71 @@ searchInput.addEventListener("keydown", async function(event){
     }
 });
 
+}
+
+bindSearchAutocomplete(searchInput, heroSuggestionBox);
+
 document.addEventListener("click", function(event){
-    if(!searchInput.contains(event.target) && !suggestionBox.contains(event.target)) hideSuggestions();
+    const input = activeSuggestionInput();
+    if(!input.contains(event.target) && !suggestionBox.contains(event.target)) hideSuggestions();
 });
+
+/* Frozen search bar autocomplete.
+   index.html creates frozen copies of the search form after a search:
+     #amiSearchResultsDock (input #amiSearchResultsDockInput) and
+     #amiSearchFreezeBar   (input #amiSearchFreezeInput, v9 script).
+   Those copies have no prediction dropdown (the v9 script even removes it)
+   and no autocomplete listeners. When a frozen bar appears, give it its own
+   dropdown directly under the bar and attach the same autocomplete. */
+const FROZEN_SEARCH_BARS = [
+    {bar: "amiSearchResultsDock", input: "amiSearchResultsDockInput"},
+    {bar: "amiSearchFreezeBar", input: "amiSearchFreezeInput"},
+];
+
+function frozenSearchInputs(){
+    return FROZEN_SEARCH_BARS
+        .map(cfg => document.getElementById(cfg.input))
+        .filter(Boolean);
+}
+
+function attachFrozenBarAutocomplete(){
+    FROZEN_SEARCH_BARS.forEach(function(cfg){
+        const input = document.getElementById(cfg.input);
+        if(!input || input.dataset.amiAutocomplete === "1") return;
+        const form = input.closest("form");
+        if(!form) return;
+        input.dataset.amiAutocomplete = "1";
+
+        const holder = document.createElement("div");
+        holder.className = "ami-frozen-suggest-wrap";
+        const box = document.createElement("div");
+        box.id = cfg.input + "Suggestions";
+        box.className = "search-suggestions ami-frozen-suggestions";
+        box.setAttribute("role", "listbox");
+        box.setAttribute("aria-label", "Search predictions");
+        holder.appendChild(box);
+        form.insertAdjacentElement("afterend", holder);
+
+        input.setAttribute("role", "combobox");
+        input.setAttribute("aria-autocomplete", "list");
+        input.setAttribute("aria-controls", box.id);
+        input.setAttribute("aria-expanded", "false");
+        input.setAttribute("autocomplete", "off");
+
+        bindSearchAutocomplete(input, box);
+    });
+}
+
+new MutationObserver(attachFrozenBarAutocomplete)
+    .observe(document.body, {childList: true, subtree: true});
+attachFrozenBarAutocomplete();
+
+// Close a frozen bar's dropdown when that bar is hidden (scrolled back up).
+window.addEventListener("scroll", function(){
+    if(suggestionBox === heroSuggestionBox) return;
+    const bar = suggestionBox.closest("#amiSearchResultsDock, #amiSearchFreezeBar");
+    if(!bar || window.getComputedStyle(bar).display === "none") hideSuggestions();
+}, {passive: true});
 
 
 
