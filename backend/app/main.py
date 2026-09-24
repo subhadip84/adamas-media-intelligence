@@ -3804,7 +3804,6 @@ def search(
                 Article.title.ilike(pattern),
                 Article.summary.ilike(pattern),
                 Article.category.ilike(pattern),
-                Source.name.ilike(pattern),
             ])
 
     # IIT campus identifiers need special candidate retrieval. For example,
