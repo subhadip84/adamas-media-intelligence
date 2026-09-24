@@ -3741,14 +3741,15 @@ def search_suggestions(
     db: Session = Depends(get_db),
 ):
     """
-    Google-style predictive suggestions for the local media index.
+    Fast Google-style predictive suggestions.
 
-    Sources used by this endpoint:
-      1. Queries actually searched in this platform (frequency + recency).
-      2. Words/phrases/headlines from indexed articles.
-      3. Source names and categories.
+    Uses:
+      1. Previously searched queries.
+      2. Recent matching article headlines.
+      3. Source names.
+      4. Categories.
 
-    It deliberately does not consume the user's search quota.
+    This endpoint does not consume search quota.
     """
     query_text = _normalise_search(q)
     if not query_text:
@@ -3758,18 +3759,18 @@ def search_suggestions(
     now = datetime.now(timezone.utc)
 
     # ---------------------------------------------------------
-    # 1. Real searches made inside this application.
-    #    This is the closest local equivalent to Google's use of
-    #    common/trending search queries.
+    # 1. Search history
     # ---------------------------------------------------------
     history_rows = db.execute(
         select(SearchQueryLog)
-        .where(SearchQueryLog.normalized_query.ilike(f"%{query_text}%"))
+        .where(
+            SearchQueryLog.normalized_query.ilike(f"{query_text}%")
+        )
         .order_by(
             SearchQueryLog.search_count.desc(),
             SearchQueryLog.last_searched_at.desc(),
         )
-        .limit(100)
+        .limit(20)
     ).scalars().all()
 
     for row in history_rows:
@@ -3779,88 +3780,131 @@ def search_suggestions(
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             age_days = max(0, (now - ts).total_seconds() / 86400)
+
         recency = max(0, 100 - min(age_days, 100))
         score = _suggestion_match_score(q, row.query)
         score += min(700, row.search_count * 45)
         score += recency
+
         _add_suggestion(bucket, row.query, score, "history")
 
     # ---------------------------------------------------------
-    # 2. Article titles/headlines.
+    # 2. Matching article titles only
+    #
+    # IMPORTANT:
+    # Do not load 1,500 newest articles and then filter them
+    # in Python. Let PostgreSQL filter first.
     # ---------------------------------------------------------
+    pattern = f"%{query_text}%"
+
     article_rows = db.execute(
         select(Article, Source)
         .join(Source, Article.source_id == Source.id)
+        .where(
+            or_(
+                Article.title.ilike(pattern),
+                Article.summary.ilike(pattern),
+            )
+        )
         .order_by(Article.published_at.desc())
-        .limit(1500)
+        .limit(100)
     ).all()
 
     for article, source in article_rows:
         title = _clean_search_text(article.title)
         if not title:
             continue
+
         title_score = _suggestion_match_score(q, title)
-        if title_score >= 450:
-            for candidate in _title_phrase_candidates(title, q):
-                score = _suggestion_match_score(q, candidate)
-                # Full headlines get a recency boost; short phrases are more
-                # useful for autocomplete and therefore get a compactness boost.
-                if candidate == title:
-                    score += 120
-                    if article.published_at:
-                        published = article.published_at
-                        if published.tzinfo is None:
-                            published = published.replace(tzinfo=timezone.utc)
-                        age_days = max(0, (now - published).total_seconds() / 86400)
-                        score += max(0, 120 - min(age_days, 120))
-                else:
-                    score += 80
-                _add_suggestion(bucket, candidate, score, "article", source.name if source else "")
+        if title_score < 450:
+            continue
+
+        for candidate in _title_phrase_candidates(title, q):
+            score = _suggestion_match_score(q, candidate)
+
+            if candidate == title:
+                score += 120
+
+                if article.published_at:
+                    published = article.published_at
+                    if published.tzinfo is None:
+                        published = published.replace(tzinfo=timezone.utc)
+
+                    age_days = max(
+                        0,
+                        (now - published).total_seconds() / 86400,
+                    )
+                    score += max(0, 120 - min(age_days, 120))
+            else:
+                score += 80
+
+            _add_suggestion(
+                bucket,
+                candidate,
+                score,
+                "article",
+                source.name if source else "",
+            )
 
     # ---------------------------------------------------------
-    # 3. Source names and categories.
+    # 3. Source names
     # ---------------------------------------------------------
     source_rows = db.execute(
-        select(Source.name).where(Source.name.is_not(None)).limit(800)
+        select(Source.name)
+        .where(
+            Source.name.is_not(None),
+            Source.name.ilike(pattern),
+        )
+        .limit(30)
     ).all()
+
     for (name,) in source_rows:
         score = _suggestion_match_score(q, name)
         if score >= 450:
             _add_suggestion(bucket, name, score + 120, "source")
 
+    # ---------------------------------------------------------
+    # 4. Categories
+    # ---------------------------------------------------------
     category_rows = db.execute(
         select(Article.category)
-        .where(Article.category.is_not(None))
+        .where(
+            Article.category.is_not(None),
+            Article.category.ilike(pattern),
+        )
         .distinct()
-        .limit(200)
+        .limit(30)
     ).all()
+
     for (category,) in category_rows:
         if not category:
             continue
+
         score = _suggestion_match_score(q, category)
         if score >= 450:
             _add_suggestion(bucket, category, score + 60, "category")
 
+    # ---------------------------------------------------------
+    # 5. Final compact result
+    # ---------------------------------------------------------
     ranked = sorted(
         bucket.values(),
-        key=lambda item: (-item["score"], item["text"].casefold()),
+        key=lambda item: (
+            -item["score"],
+            item["text"].casefold(),
+        ),
     )
 
-    # Google-like compact dropdown: 10 useful predictions, not 50 search results.
-    suggestions = []
-    for item in ranked:
-        # Avoid returning only very long headlines when better short phrases exist.
-        suggestions.append(item["text"])
-        if len(suggestions) >= 10:
-            break
+    suggestions = [
+        item["text"]
+        for item in ranked[:10]
+    ]
 
     return {
         "status": "success",
         "query": q,
         "suggestions": suggestions,
     }
-
-
 @app.get("/api/search/diagnostic")
 def search_diagnostic(
     q: str = Query(min_length=1, max_length=200),
@@ -7156,6 +7200,7 @@ def reset_all_users(
         get_free_search_limit(db),
 
     }
+
 
 
 
