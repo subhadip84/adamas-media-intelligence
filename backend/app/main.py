@@ -3701,6 +3701,13 @@ def _prefix_similarity(typed: str, candidate: str) -> float:
     return common / max(1, len(typed))
 
 
+def _prefix_similarity_normalised(typed: str, candidate: str) -> float:
+    """Prefix similarity for already-normalised text."""
+    if not typed or not candidate:
+        return 0.0
+    return _prefix_similarity(typed, candidate)
+
+
 def _suggestion_score_normalised(q: str, c: str, minimum: Optional[float] = None) -> float:
     """Autocomplete score for already-normalised query/candidate text.
 
@@ -7346,6 +7353,8 @@ def reset_all_users(
         get_free_search_limit(db),
 
     }
+
+
 
 
 
