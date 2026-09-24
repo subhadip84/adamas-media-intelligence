@@ -67,6 +67,130 @@ from sqlalchemy.orm import (
 
 
 # =========================================================
+class _TTLCache:
+    def __init__(self, maxsize=128):
+        self.maxsize = maxsize
+        self._data = {}
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        now = time.monotonic()
+        with self._lock:
+            item = self._data.get(key)
+            if item is None:
+                return None
+
+            value, expires_at = item
+            if expires_at <= now:
+                self._data.pop(key, None)
+                return None
+
+            return value
+
+    def set(self, key, value, ttl):
+        now = time.monotonic()
+        with self._lock:
+            self._data[key] = (value, now + ttl)
+
+            if len(self._data) > self.maxsize:
+                oldest_key = min(
+                    self._data,
+                    key=lambda k: self._data[k][1],
+                )
+                self._data.pop(oldest_key, None)
+# --- Predictive suggestion cache ---
+SUGGESTION_TITLES_TTL = int(os.getenv("SUGGESTION_TITLES_TTL", "60"))
+SUGGESTION_META_TTL = int(os.getenv("SUGGESTION_META_TTL", "300"))
+SUGGESTION_RESULT_TTL = int(os.getenv("SUGGESTION_RESULT_TTL", "30"))
+
+_SUGGESTION_TITLES_CACHE = _TTLCache(maxsize=2)
+_SUGGESTION_META_CACHE = _TTLCache(maxsize=2)
+_SUGGESTION_RESULT_CACHE = _TTLCache(maxsize=4096)
+
+_suggestion_titles_lock = threading.Lock()
+
+
+def _suggestion_recent_titles(db):
+    cached = _SUGGESTION_TITLES_CACHE.get("recent")
+    if cached is not None:
+        return cached
+
+    with _suggestion_titles_lock:
+        cached = _SUGGESTION_TITLES_CACHE.get("recent")
+        if cached is not None:
+            return cached
+
+        rows = db.execute(
+            select(
+                Article.title,
+                Article.published_at,
+                Source.name,
+            )
+            .join(Source, Article.source_id == Source.id)
+            .order_by(Article.published_at.desc())
+            .limit(1500)
+        ).all()
+
+        result = []
+        for title, published_at, source_name in rows:
+            clean_title = _clean_search_text(title)
+            if not clean_title:
+                continue
+
+            result.append(
+                (
+                    clean_title,
+                    _normalise_suggestion(clean_title),
+                    published_at,
+                    source_name,
+                )
+            )
+
+        _SUGGESTION_TITLES_CACHE.set(
+            "recent",
+            tuple(result),
+            SUGGESTION_TITLES_TTL,
+        )
+        return tuple(result)
+
+
+def _suggestion_source_and_category_names(db):
+    cached = _SUGGESTION_META_CACHE.get("meta")
+    if cached is not None:
+        return cached
+
+    source_rows = db.execute(
+        select(Source.name)
+        .where(Source.name.is_not(None))
+        .limit(800)
+    ).all()
+
+    category_rows = db.execute(
+        select(Article.category)
+        .where(Article.category.is_not(None))
+        .distinct()
+        .limit(200)
+    ).all()
+
+    sources = tuple(
+        name for (name,) in source_rows
+        if name
+    )
+
+    categories = tuple(
+        category for (category,) in category_rows
+        if category
+    )
+
+    result = (sources, categories)
+
+    _SUGGESTION_META_CACHE.set(
+        "meta",
+        result,
+        SUGGESTION_META_TTL,
+    )
+    return result
+
 # CONFIGURATION
 # =========================================================
 
@@ -2687,6 +2811,9 @@ def _normalise_search(value: Optional[str]) -> str:
 _normalise_short = lru_cache(maxsize=4096)(_normalise_search)
 
 
+_normalise_suggestion = lru_cache(maxsize=65536)(_normalise_search)
+
+
 def _compact_search(value: Optional[str]) -> str:
     """Normalize identifiers/acronyms without separators: IIT-B -> iitb."""
     return _compact_from_clean(_clean_search_text(value))
@@ -3574,10 +3701,15 @@ def _prefix_similarity(typed: str, candidate: str) -> float:
     return common / max(1, len(typed))
 
 
-def _suggestion_match_score(query: str, candidate: str) -> float:
-    """Score a suggestion like an autocomplete engine, not like article search."""
-    q = _normalise_search(query)
-    c = _normalise_search(candidate)
+def _suggestion_score_normalised(q: str, c: str, minimum: Optional[float] = None) -> float:
+    """Autocomplete score for already-normalised query/candidate text.
+
+    Identical arithmetic to the previous _suggestion_match_score. When
+    `minimum` is given and the candidate cannot reach it even with a perfect
+    fuzzy ratio (worth at most 180 points), the expensive difflib step is
+    skipped and a score below `minimum` is returned. Callers only compare such
+    scores against `minimum`, so the outcome is unchanged.
+    """
     if not q or not c:
         return -1.0
 
@@ -3594,7 +3726,7 @@ def _suggestion_match_score(query: str, candidate: str) -> float:
 
     # Single-word prediction: "crid" -> "cricket", "cricbuzz", "cricinfo".
     first_token = c_tokens[0] if c_tokens else c
-    sim = _prefix_similarity(q_tokens[-1], first_token)
+    sim = _prefix_similarity_normalised(q_tokens[-1], first_token)
     score += sim * 1300
 
     # Multi-word prediction: match the typed words in order and reward a
@@ -3607,7 +3739,7 @@ def _suggestion_match_score(query: str, candidate: str) -> float:
             matched += 1
             score += 500
         else:
-            token_sim = _prefix_similarity(qt, c_tokens[i])
+            token_sim = _prefix_similarity_normalised(qt, c_tokens[i])
             if token_sim >= 0.60:
                 matched += 1
                 score += token_sim * 420
@@ -3618,11 +3750,21 @@ def _suggestion_match_score(query: str, candidate: str) -> float:
     # Short, natural autocomplete phrases are preferred to very long headlines.
     score += max(0, 180 - max(0, len(c_tokens) - 3) * 18)
 
+    if minimum is not None and score + 180 < minimum:
+        return score
+
     # Fuzzy fallback helps with small typing mistakes.
     score += difflib.SequenceMatcher(None, q, c[: max(len(q), min(len(c), len(q) + 18))]).ratio() * 180
 
     return score
 
+
+def _suggestion_match_score(query: str, candidate: str) -> float:
+    """Score a suggestion like an autocomplete engine, not like article search."""
+    return _suggestion_score_normalised(
+        _normalise_suggestion(query),
+        _normalise_suggestion(candidate),
+    )
 
 def _add_suggestion(bucket: dict, text: str, score: float, kind: str = "query", meta: str = ""):
     cleaned = _clean_search_text(text)
@@ -3745,15 +3887,23 @@ def search_suggestions(
 
     Uses:
       1. Previously searched queries.
-      2. Recent matching article headlines.
-      3. Source names.
-      4. Categories.
+      2. Cached recent article headlines.
+      3. Cached source names.
+      4. Cached categories.
 
     This endpoint does not consume search quota.
     """
-    query_text = _normalise_search(q)
+    query_text = _normalise_suggestion(q)
     if not query_text:
         return {"status": "success", "query": q, "suggestions": []}
+
+    cached = _SUGGESTION_RESULT_CACHE.get(query_text)
+    if cached is not None:
+        return {
+            "status": "success",
+            "query": q,
+            "suggestions": list(cached),
+        }
 
     bucket = {}
     now = datetime.now(timezone.utc)
@@ -3764,13 +3914,13 @@ def search_suggestions(
     history_rows = db.execute(
         select(SearchQueryLog)
         .where(
-            SearchQueryLog.normalized_query.ilike(f"{query_text}%")
+            SearchQueryLog.normalized_query.ilike(f"%{query_text}%")
         )
         .order_by(
             SearchQueryLog.search_count.desc(),
             SearchQueryLog.last_searched_at.desc(),
         )
-        .limit(20)
+        .limit(100)
     ).scalars().all()
 
     for row in history_rows:
@@ -3779,113 +3929,102 @@ def search_suggestions(
             ts = row.last_searched_at
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
-            age_days = max(0, (now - ts).total_seconds() / 86400)
+
+            age_days = max(
+                0,
+                (now - ts).total_seconds() / 86400,
+            )
 
         recency = max(0, 100 - min(age_days, 100))
+
         score = _suggestion_match_score(q, row.query)
         score += min(700, row.search_count * 45)
         score += recency
 
-        _add_suggestion(bucket, row.query, score, "history")
-
-    # ---------------------------------------------------------
-    # 2. Matching article titles only
-    #
-    # IMPORTANT:
-    # Do not load 1,500 newest articles and then filter them
-    # in Python. Let PostgreSQL filter first.
-    # ---------------------------------------------------------
-    pattern = f"%{query_text}%"
-
-    article_rows = db.execute(
-        select(Article, Source)
-        .join(Source, Article.source_id == Source.id)
-        .where(
-            or_(
-                Article.title.ilike(pattern),
-                Article.summary.ilike(pattern),
-            )
+        _add_suggestion(
+            bucket,
+            row.query,
+            score,
+            "history",
         )
-        .order_by(Article.published_at.desc())
-        .limit(100)
-    ).all()
 
-    for article, source in article_rows:
-        title = _clean_search_text(article.title)
-        if not title:
-            continue
+    # ---------------------------------------------------------
+    # 2. Cached recent article headlines
+    # ---------------------------------------------------------
+    for title, title_norm, published_at, source_name in _suggestion_recent_titles(db):
+        title_score = _suggestion_score_normalised(
+            query_text,
+            title_norm,
+            minimum=450,
+        )
 
-        title_score = _suggestion_match_score(q, title)
-        if title_score < 450:
-            continue
+        if title_score >= 450:
+            for candidate in _title_phrase_candidates(title, q):
+                score = _suggestion_match_score(q, candidate)
 
-        for candidate in _title_phrase_candidates(title, q):
-            score = _suggestion_match_score(q, candidate)
+                if candidate == title:
+                    score += 120
 
-            if candidate == title:
-                score += 120
+                    if published_at:
+                        published = published_at
 
-                if article.published_at:
-                    published = article.published_at
-                    if published.tzinfo is None:
-                        published = published.replace(tzinfo=timezone.utc)
+                        if published.tzinfo is None:
+                            published = published.replace(
+                                tzinfo=timezone.utc
+                            )
 
-                    age_days = max(
-                        0,
-                        (now - published).total_seconds() / 86400,
-                    )
-                    score += max(0, 120 - min(age_days, 120))
-            else:
-                score += 80
+                        age_days = max(
+                            0,
+                            (now - published).total_seconds() / 86400,
+                        )
 
+                        score += max(
+                            0,
+                            120 - min(age_days, 120),
+                        )
+                else:
+                    score += 80
+
+                _add_suggestion(
+                    bucket,
+                    candidate,
+                    score,
+                    "article",
+                    source_name or "",
+                )
+
+    # ---------------------------------------------------------
+    # 3. Cached source names and categories
+    # ---------------------------------------------------------
+    source_names, category_names = _suggestion_source_and_category_names(db)
+
+    for name in source_names:
+        score = _suggestion_match_score(q, name)
+
+        if score >= 450:
             _add_suggestion(
                 bucket,
-                candidate,
-                score,
-                "article",
-                source.name if source else "",
+                name,
+                score + 120,
+                "source",
             )
 
-    # ---------------------------------------------------------
-    # 3. Source names
-    # ---------------------------------------------------------
-    source_rows = db.execute(
-        select(Source.name)
-        .where(
-            Source.name.is_not(None),
-            Source.name.ilike(pattern),
-        )
-        .limit(30)
-    ).all()
-
-    for (name,) in source_rows:
-        score = _suggestion_match_score(q, name)
-        if score >= 450:
-            _add_suggestion(bucket, name, score + 120, "source")
-
-    # ---------------------------------------------------------
-    # 4. Categories
-    # ---------------------------------------------------------
-    category_rows = db.execute(
-        select(Article.category)
-        .where(
-            Article.category.is_not(None),
-            Article.category.ilike(pattern),
-        )
-        .distinct()
-        .limit(30)
-    ).all()
-
-    for (category,) in category_rows:
+    for category in category_names:
         if not category:
             continue
 
         score = _suggestion_match_score(q, category)
+
         if score >= 450:
-            _add_suggestion(bucket, category, score + 60, "category")
+            _add_suggestion(
+                bucket,
+                category,
+                score + 60,
+                "category",
+            )
 
     # ---------------------------------------------------------
-    # 5. Final compact result
+    # 4. Final compact result
     # ---------------------------------------------------------
     ranked = sorted(
         bucket.values(),
@@ -3900,11 +4039,18 @@ def search_suggestions(
         for item in ranked[:10]
     ]
 
+    _SUGGESTION_RESULT_CACHE.set(
+        query_text,
+        tuple(suggestions),
+        SUGGESTION_RESULT_TTL,
+    )
+
     return {
         "status": "success",
         "query": q,
         "suggestions": suggestions,
     }
+
 @app.get("/api/search/diagnostic")
 def search_diagnostic(
     q: str = Query(min_length=1, max_length=200),
@@ -7200,6 +7346,12 @@ def reset_all_users(
         get_free_search_limit(db),
 
     }
+
+
+
+
+
+
 
 
 
