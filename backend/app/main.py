@@ -3796,16 +3796,19 @@ def search(
     # Keeping them out of the normal SQL OR tree avoids expensive ILIKE predicates.
     # Dedicated entity retrieval below remains unchanged.
 
+    # Fast SQL candidate retrieval.
+    # PostgreSQL trigram indexes cover the article text columns.
+    # Morphology, aliases and source relevance are handled by the Python ranker.
+    # Keeping SQL to exact query tokens avoids a large OR/ILIKE explosion.
     for token in retrieval_terms:
-        variants = _token_variants(token)
-        for variant in variants:
-            pattern = f"%{variant}%"
-            token_conditions.extend([
-                Article.title.ilike(pattern),
-                Article.summary.ilike(pattern),
-                Article.category.ilike(pattern),
-            ])
-
+        if len(token) < 2:
+            continue
+        pattern = f"%{token}%"
+        token_conditions.extend([
+            Article.title.ilike(pattern),
+            Article.summary.ilike(pattern),
+            Article.category.ilike(pattern),
+        ])
     # IIT campus identifiers need special candidate retrieval. For example,
     # "IIT-M" normalises to tokens ["iit", "m"], but a real article is
     # normally titled "IIT Madras", so requiring the literal token "m" in SQL
@@ -3906,7 +3909,7 @@ def search(
         select(Article, Source)
         .join(Source, Article.source_id == Source.id)
         .where(*search_conditions)
-        .limit(2000)
+        .limit(800)
     ).all()
 
     # Campus-aware hard gate. SQL token matching intentionally remains broad
@@ -6803,3 +6806,4 @@ def reset_all_users(
         get_free_search_limit(db),
 
     }
+
