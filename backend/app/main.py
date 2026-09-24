@@ -3909,7 +3909,7 @@ def search(
         select(Article, Source)
         .join(Source, Article.source_id == Source.id)
         .where(*search_conditions)
-        .limit(800)
+        .limit(300)
     ).all()
 
     # Campus-aware hard gate. SQL token matching intentionally remains broad
@@ -6806,4 +6806,5 @@ def reset_all_users(
         get_free_search_limit(db),
 
     }
+
 
