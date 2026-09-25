@@ -354,6 +354,8 @@ function setActiveSuggestion(index){
     if(suggestionIndex >= 0){
         const active = items[suggestionIndex];
         activeSuggestionInput().setAttribute("aria-activedescendant", active.id);
+        const activeText = active.querySelector(".search-suggestion-text");
+        prefetchResults(activeText ? activeText.textContent : active.textContent);
         active.scrollIntoView({block:"nearest"});
     } else {
         activeSuggestionInput().removeAttribute("aria-activedescendant");
@@ -445,6 +447,91 @@ function instantSuggestions(query){
     return null;
 }
 
+/* ---------------------------------------------------------
+   Local prediction index: popular searches, headline words/phrases,
+   sources and categories, downloaded once (cached 5 minutes). Predictions
+   are computed in the browser on every keystroke with no network wait;
+   the server suggestions endpoint then refines the list.
+--------------------------------------------------------- */
+let predictionIndex = [];
+
+async function loadPredictionIndex(){
+    try{
+        const response = await fetch(API + "/api/search/prediction-index", {headers:{"Accept":"application/json"}});
+        if(!response.ok) return;
+        const data = await response.json();
+        predictionIndex = (Array.isArray(data.items) ? data.items : [])
+            .map(item => ({text: String(item[0]), lower: String(item[0]).toLowerCase(), weight: Number(item[1]) || 0}));
+    }catch(error){ /* predictions still come from the server */ }
+}
+
+function localPredictions(query){
+    const key = suggestionKey(query);
+    if(!key || !predictionIndex.length) return [];
+    const scored = [];
+    for(const item of predictionIndex){
+        let score;
+        if(item.lower === key) score = 5000;
+        else if(item.lower.startsWith(key)) score = 3000;
+        else if(item.lower.includes(" " + key)) score = 1500;
+        else continue;
+        scored.push([score + Math.min(item.weight, 2000), item.text]);
+    }
+    scored.sort((a, b) => b[0] - a[0]);
+    return scored.slice(0, 10).map(item => item[1]);
+}
+
+/* ---------------------------------------------------------
+   Result prefetch: while the user types or highlights a prediction, the
+   results are fetched in the background from /api/search/preview (no quota
+   used). Clicking/pressing Enter then shows them instantly; the normal
+   /api/search call still runs to count the search.
+--------------------------------------------------------- */
+const resultPrefetch = new Map();
+const RESULT_PREFETCH_MAX = 40;
+const RESULT_PREFETCH_TTL_MS = 55000;
+let prefetchTimer = null;
+
+function resultPrefetchKey(query){
+    return suggestionKey(query) + "|" + getSearchFilterParams().toString();
+}
+
+function freshPrefetch(query){
+    const entry = resultPrefetch.get(resultPrefetchKey(query));
+    if(!entry || Date.now() - entry.at > RESULT_PREFETCH_TTL_MS) return null;
+    return entry;
+}
+
+function prefetchResults(query){
+    const text = String(query || "").trim();
+    if(text.length < 2 || freshPrefetch(text)) return;
+    const key = resultPrefetchKey(text);
+    const entry = {at: Date.now(), data: null, promise: null};
+    entry.promise = fetch(
+        API + "/api/search/preview?q=" + encodeURIComponent(text) + "&" + getSearchFilterParams().toString(),
+        {headers:{"X-User-Key": userKey, "X-Auth-Token": subscriberToken}}
+    )
+        .then(response => response.ok ? response.json() : null)
+        .then(data => {
+            if(data && Array.isArray(data.results)) entry.data = data;
+            else resultPrefetch.delete(key);
+            return entry.data;
+        })
+        .catch(() => { resultPrefetch.delete(key); return null; });
+    resultPrefetch.set(key, entry);
+    while(resultPrefetch.size > RESULT_PREFETCH_MAX){
+        resultPrefetch.delete(resultPrefetch.keys().next().value);
+    }
+}
+
+function schedulePrefetch(query, items){
+    clearTimeout(prefetchTimer);
+    prefetchTimer = setTimeout(() => {
+        prefetchResults(query);
+        if(items && items.length) prefetchResults(items[0]);
+    }, 250);
+}
+
 function renderSuggestionsOnce(items, query){
     // Avoid re-rendering (and losing the arrow-key highlight) when the same
     // list for this query is already on screen.
@@ -452,6 +539,7 @@ function renderSuggestionsOnce(items, query){
     if(signature === lastShownSuggestionKey && suggestionBox.classList.contains("show")) return;
     lastShownSuggestionKey = signature;
     showSuggestions(items, query);
+    schedulePrefetch(query, items);
 }
 
 async function loadSuggestions(query){
@@ -500,10 +588,24 @@ input.addEventListener("input", function(){
     }
     // New prefix: filter the previous predictions locally right away, then
     // ask the server after a short pause in typing.
-    const instant = value.length >= 2 ? instantSuggestions(value) : null;
+    let instant = value.length >= 2 ? instantSuggestions(value) : null;
+    if(!instant || !instant.length) instant = localPredictions(value);
     if(instant && instant.length) renderSuggestionsOnce(instant, value);
+    else if(value.length < 2) hideSuggestions();
+    // The server refines predictions from 2 characters.
+    if(value.length < 2) return;
     suggestionTimer = setTimeout(() => loadSuggestions(value), 100);
 });
+
+if(!box.dataset.amiHoverPrefetch){
+    box.dataset.amiHoverPrefetch = "1";
+    box.addEventListener("mouseover", function(event){
+        const option = event.target.closest(".search-suggestion");
+        if(!option) return;
+        const text = option.querySelector(".search-suggestion-text");
+        prefetchResults(text ? text.textContent : option.textContent);
+    });
+}
 
 input.addEventListener("keydown", async function(event){
     useSuggestionTarget(input, box);
@@ -765,13 +867,36 @@ async function performSearch(query, filterOnly = false){
 
 
     lastSearchQuery = String(query || "").trim();
+    const searchedQuery = lastSearchQuery;
 
-    resultsTitle.textContent =
-        "Searching...";
+    // Instant results: use results prefetched while the user was typing.
+    const prefetched = filterOnly ? null : freshPrefetch(searchedQuery);
+    let shownFromPrefetch = false;
+    let realSearchDone = false;
+    let shownResultIds = "";
 
+    if(prefetched && prefetched.data){
+        applySearchData(prefetched.data, true);
+        shownFromPrefetch = true;
+        shownResultIds = resultIds(prefetched.data);
+    }else{
+        resultsTitle.textContent =
+            "Searching...";
 
-    resultsList.innerHTML =
-        '<div class="loading">Searching indexed media sources...</div>';
+        resultsList.innerHTML =
+            '<div class="loading">Searching indexed media sources...</div>';
+
+        // A prefetch still in flight may answer before the real request.
+        if(prefetched && prefetched.promise){
+            prefetched.promise.then(data => {
+                if(data && !realSearchDone && lastSearchQuery === searchedQuery){
+                    applySearchData(data, true);
+                    shownFromPrefetch = true;
+                    shownResultIds = resultIds(data);
+                }
+            });
+        }
+    }
 
 
     try{
@@ -795,7 +920,15 @@ async function performSearch(query, filterOnly = false){
             );
 
 
+        realSearchDone = true;
+
         if(response.status === 402){
+
+            if(shownFromPrefetch){
+                currentResults = [];
+                resultsTitle.textContent = "Search Results";
+                resultsList.innerHTML = "";
+            }
 
             openQuotaModal();
 
@@ -820,6 +953,48 @@ refreshQuota();
         const data =
             await response.json();
 
+        // Already on screen from the prefetch: only refresh if different.
+        if(shownFromPrefetch && resultIds(data) === shownResultIds){
+            refreshQuota();
+            return;
+        }
+
+        applySearchData(data, !shownFromPrefetch);
+
+    }
+
+    catch(error){
+
+        if(shownFromPrefetch) return;
+
+        resultsTitle.textContent =
+            "Search Results";
+
+
+        const saveTop = document.getElementById("saveSearchTopButton");
+        if(saveTop) saveTop.disabled = true;
+
+        resultsList.innerHTML =
+            `
+            <div class="empty-state">
+                Unable to connect to the Media Intelligence API.
+                Please ensure the Docker services are running.
+            </div>
+            `;
+
+    }
+
+}
+
+
+function resultIds(data){
+    return (Array.isArray(data && data.results) ? data.results : [])
+        .map(item => item.id).join(",");
+}
+
+
+/* Render a search response (from /api/search or a prefetched preview). */
+function applySearchData(data, scroll){
 
         currentResults =
             Array.isArray(data.results)
@@ -849,30 +1024,10 @@ refreshQuota();
         // keep the search bar accessible at the top while the results scroll.
         activateGoogleStickySearch();
 
-        await refreshQuota();
+        // Quota refresh no longer blocks showing the results.
+        refreshQuota();
 
-        scrollToResults();
-
-    }
-
-    catch(error){
-
-        resultsTitle.textContent =
-            "Search Results";
-
-
-        const saveTop = document.getElementById("saveSearchTopButton");
-        if(saveTop) saveTop.disabled = true;
-
-        resultsList.innerHTML =
-            `
-            <div class="empty-state">
-                Unable to connect to the Media Intelligence API.
-                Please ensure the Docker services are running.
-            </div>
-            `;
-
-    }
+        if(scroll) scrollToResults();
 
 }
 
@@ -4566,3 +4721,8 @@ async function generateBriefing(){const box=document.getElementById('miBriefing'
 /* Wake the API early (Render instances sleep when idle) and open the HTTPS
    connection before the user's first keystroke. */
 fetch(API + "/health", {cache: "no-store"}).catch(() => {});
+
+
+// Download the prediction index once the page has loaded.
+if(document.readyState === "complete") loadPredictionIndex();
+else window.addEventListener("load", loadPredictionIndex, {once: true});

@@ -4488,6 +4488,167 @@ def _search_ranked_payload(
 
     return results_payload, result_count
 
+
+def _cached_ranked_search(
+    db: Session,
+    q: str,
+    query_text: str,
+    tokens: list,
+    search_context: dict,
+    date_range: str,
+    categories: str,
+    language: str,
+    source: str,
+) -> tuple:
+    """Ranked results for a query + filters, cached for SEARCH_RESULT_TTL s.
+
+    Shared by /api/search (counts quota) and /api/search/preview (prefetch,
+    no quota), so a result prefetched while typing is the same one the real
+    search returns. Returns (results_payload, result_count, selected_categories).
+    """
+    selected_categories = [
+        item.strip().lower()
+        for item in categories.split(",")
+        if item.strip() and item.strip().lower() != "all"
+    ]
+    search_cache_key = (
+        query_text,
+        date_range.strip(),
+        tuple(sorted(selected_categories)),
+        language.strip().lower(),
+        source.strip().lower(),
+    )
+    cached_search = _SEARCH_RESULT_CACHE.get(search_cache_key)
+    if cached_search is not None:
+        results_payload, result_count = cached_search
+    else:
+        results_payload, result_count = _search_ranked_payload(
+            db, q, query_text, tokens, search_context,
+            date_range, selected_categories, language, source,
+        )
+        _SEARCH_RESULT_CACHE.set(search_cache_key, (results_payload, result_count), SEARCH_RESULT_TTL)
+    return results_payload, result_count, selected_categories
+
+
+@app.get("/api/search/preview")
+def search_preview(
+    response: Response,
+    q: str = Query(min_length=1, max_length=200),
+    user_key: str = Header(alias="X-User-Key"),
+    x_auth_token: Optional[str] = Header(None, alias="X-Auth-Token"),
+    date_range: str = Query("30", max_length=10),
+    categories: str = Query("", max_length=500),
+    language: str = Query("", max_length=100),
+    source: str = Query("", max_length=255),
+    db: Session = Depends(get_db),
+):
+    """Prefetch search results while the user is still typing (Google-style).
+
+    Does NOT consume quota and does not log the search: the frontend still
+    calls /api/search when the user actually searches, which counts it.
+    Only available when this user could run the search right now
+    (active subscriber, or free searches remaining), so it cannot be used to
+    read results after the free limit is reached.
+    """
+    subscriber = _subscriber_from_token(x_auth_token, db)
+    if not subscriber:
+        usage = db.scalar(select(Usage).where(Usage.user_key == user_key))
+        searches_used = usage.searches_used if usage else 0
+        if searches_used >= get_free_search_limit(db):
+            raise HTTPException(status_code=402, detail={"message": "Free search limit reached."})
+
+    search_context = _prepare_search_context(q)
+    query_text = search_context["q"]
+    if not query_text:
+        return {"status": "success", "query": q, "count": 0, "results": []}
+
+    results_payload, result_count, _selected = _cached_ranked_search(
+        db, q, query_text, search_context["q_tokens"], search_context,
+        date_range, categories, language, source,
+    )
+    response.headers["Cache-Control"] = "private, max-age=60"
+    return {
+        "status": "success",
+        "query": q,
+        "count": result_count,
+        "results": results_payload,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Prediction index for instant, in-browser predictions
+# ---------------------------------------------------------------------------
+PREDICTION_INDEX_TTL = int(os.getenv("PREDICTION_INDEX_TTL", "300"))
+_PREDICTION_INDEX_CACHE = _TTLCache(maxsize=2)
+_PREDICTION_STOP_WORDS = SEARCH_STOP_WORDS | {
+    "said", "says", "will", "has", "have", "had", "its", "their", "after",
+    "over", "new", "more", "also", "than", "this", "been", "into", "about",
+}
+
+
+@app.get("/api/search/prediction-index")
+def search_prediction_index(
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Compact phrase list the browser uses to predict on every keystroke with
+    no network wait. The server suggestions endpoint still refines the list a
+    moment later. Items are [text, weight]; cached 5 minutes on both sides.
+    """
+    response.headers["Cache-Control"] = f"public, max-age={PREDICTION_INDEX_TTL}"
+    cached = _PREDICTION_INDEX_CACHE.get("index")
+    if cached is not None:
+        return cached
+
+    weights: dict[str, list] = {}
+
+    def add(text: str, weight: float):
+        text = re.sub(r"\s+", " ", str(text or "")).strip()
+        key = text.lower()
+        if len(key) < 2 or len(key) > 80:
+            return
+        current = weights.get(key)
+        if current is None or weight > current[1]:
+            weights[key] = [text, weight]
+
+    # 1. What people actually search for here (strongest signal).
+    for query, count in db.execute(
+        select(SearchQueryLog.query, SearchQueryLog.search_count)
+        .where(SearchQueryLog.normalized_query != "")
+        .order_by(SearchQueryLog.search_count.desc(), SearchQueryLog.last_searched_at.desc())
+        .limit(1500)
+    ).all():
+        add(query, 1000 + min(2000, int(count or 0) * 45))
+
+    # 2. Frequent words and two-word phrases from recent headlines.
+    word_counts = Counter()
+    phrase_counts = Counter()
+    for item in _suggestion_recent_titles(db):
+        words = [w for w in item[1].split() if len(w) >= 3 and w not in _PREDICTION_STOP_WORDS]
+        word_counts.update(set(words))
+        phrase_counts.update({f"{a} {b}" for a, b in zip(words, words[1:])})
+    for word, count in word_counts.most_common(2500):
+        add(word, 200 + count * 10)
+    for phrase, count in phrase_counts.most_common(2500):
+        if count >= 2:
+            add(phrase, 150 + count * 12)
+
+    # 3. Sources and categories.
+    source_names, category_names = _suggestion_source_and_category_names(db)
+    for name in source_names:
+        add(name, 400)
+    for category in category_names:
+        add(category, 300)
+
+    items = sorted(weights.values(), key=lambda item: -item[1])[:6000]
+    payload = {
+        "status": "success",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "items": [[text, round(weight)] for text, weight in items],
+    }
+    _PREDICTION_INDEX_CACHE.set("index", payload, PREDICTION_INDEX_TTL)
+    return payload
+
 @app.get("/api/search")
 def search(
     q: str = Query(min_length=1, max_length=200),
@@ -4578,27 +4739,10 @@ def search(
     # Retrieval + ranking are skipped on a hit; quota counting, search
     # logging and the response below are still processed per request.
     # -------------------------------------------------------------
-    selected_categories = [
-        item.strip().lower()
-        for item in categories.split(",")
-        if item.strip() and item.strip().lower() != "all"
-    ]
-    search_cache_key = (
-        query_text,
-        date_range.strip(),
-        tuple(sorted(selected_categories)),
-        language.strip().lower(),
-        source.strip().lower(),
+    results_payload, result_count, selected_categories = _cached_ranked_search(
+        db, q, query_text, tokens, search_context,
+        date_range, categories, language, source,
     )
-    cached_search = _SEARCH_RESULT_CACHE.get(search_cache_key)
-    if cached_search is not None:
-        results_payload, result_count = cached_search
-    else:
-        results_payload, result_count = _search_ranked_payload(
-            db, q, query_text, tokens, search_context,
-            date_range, selected_categories, language, source,
-        )
-        _SEARCH_RESULT_CACHE.set(search_cache_key, (results_payload, result_count), SEARCH_RESULT_TTL)
 
     # Only a new user search is counted. Filter-only refreshes are generated
     # by changing Date/Category/Language/Source and must not consume quota or
