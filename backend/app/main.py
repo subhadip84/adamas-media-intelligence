@@ -8,6 +8,7 @@ import calendar
 import re
 import difflib
 import threading
+import contextvars
 from functools import lru_cache
 import html as html_lib
 import json
@@ -52,6 +53,8 @@ from sqlalchemy import (
     and_,
     func,
 )
+
+from sqlalchemy import event as sa_event
 
 # Aliased: many functions in this module use local variables named text/update.
 from sqlalchemy import text as sa_text, update as sa_update
@@ -700,6 +703,14 @@ class Article(Base):
     # When the publisher page was last checked for a preview image, so pages
     # without an image are not re-fetched on every view. Added to existing
     # databases by _ensure_schema() at startup.
+    # Pre-computed search text (normalised title/summary, campus entity codes).
+    # Filled automatically on insert/update (see _fill_article_search_columns)
+    # and back-filled for older rows at startup, so a restart does not have to
+    # re-clean every summary's HTML in Python before searches are fast.
+    search_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    search_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    search_entities: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
     image_checked_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -1499,6 +1510,12 @@ def _ensure_schema() -> None:
         conn.execute(sa_text(
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS image_checked_at TIMESTAMPTZ"
         ))
+        for column_sql in (
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS search_title TEXT",
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS search_summary TEXT",
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS search_entities VARCHAR(500)",
+        ):
+            conn.execute(sa_text(column_sql))
 
 
 def _ensure_search_indexes() -> None:
@@ -1996,6 +2013,19 @@ app = FastAPI(
 # CORS
 # =========================================================
 
+@app.middleware("http")
+async def _count_active_requests(request, call_next):
+    """Lets background warm-up/back-fill pause while users are searching."""
+    global _active_requests
+    with _active_requests_lock:
+        _active_requests += 1
+    try:
+        return await call_next(request)
+    finally:
+        with _active_requests_lock:
+            _active_requests -= 1
+
+
 # Compress JSON responses (a 50-result search is ~75 KB raw, ~17 KB gzipped).
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
@@ -2119,8 +2149,12 @@ def startup():
 
     # Pre-compute search text for recent articles (background, best effort).
     if SEARCH_CACHE_WARMUP:
+        def _backfill_then_warm():
+            _backfill_search_columns()
+            _warm_search_cache()
+
         threading.Thread(
-            target=_warm_search_cache,
+            target=_backfill_then_warm,
             name="search-cache-warmup",
             daemon=True,
         ).start()
@@ -3081,10 +3115,59 @@ class _ArticleSearchFields:
         return self._entity_codes
 
 
+def _fields_from_stored(title_n: str, summary_n: str, entities: Optional[str]) -> _ArticleSearchFields:
+    """Build search fields from stored normalised text (no HTML/regex work).
+
+    The compact form equals the normalised form without spaces, so it does not
+    need to be stored separately.
+    """
+    fields = _ArticleSearchFields.__new__(_ArticleSearchFields)
+    fields.title = title_n
+    fields.summary = summary_n
+    fields.title_compact = title_n.replace(" ", "")
+    fields.summary_compact = summary_n.replace(" ", "")
+    fields.title_tokens = tuple(title_n.split())
+    fields.title_words = frozenset(fields.title_tokens)
+    fields.summary_words = frozenset(summary_n.split())
+    fields._entity_codes = set(entities.split()) if entities is not None else None
+    return fields
+
+
+def _search_columns_for(title_raw: Optional[str], summary_raw: Optional[str]) -> dict:
+    fields = _ArticleSearchFields(title_raw or "", summary_raw or "")
+    return {
+        "search_title": fields.title,
+        "search_summary": fields.summary,
+        "search_entities": " ".join(sorted(fields.entity_codes))[:500],
+    }
+
+
+def _fill_article_search_columns(mapper, connection, article) -> None:
+    """ORM hook: keep the stored search text in sync on insert/update."""
+    for name, value in _search_columns_for(article.title, article.summary).items():
+        setattr(article, name, value)
+
+
+sa_event.listen(Article, "before_insert", _fill_article_search_columns)
+sa_event.listen(Article, "before_update", _fill_article_search_columns)
+
+
 _ARTICLE_FIELDS_CACHE = _LRUCache(SEARCH_ARTICLE_CACHE_SIZE)
 
 
 def _article_fields(article: Article) -> _ArticleSearchFields:
+    stored_title = getattr(article, "search_title", None)
+    stored_summary = getattr(article, "search_summary", None)
+    if stored_title is not None and stored_summary is not None:
+        key = (article.id, "stored", hash(stored_title), hash(stored_summary))
+        fields = _ARTICLE_FIELDS_CACHE.get(key)
+        if fields is None:
+            fields = _fields_from_stored(
+                stored_title, stored_summary, getattr(article, "search_entities", None)
+            )
+            _ARTICLE_FIELDS_CACHE.set(key, fields)
+        return fields
+
     title = article.title or ""
     summary = article.summary or ""
     # The text hash is part of the key, so an edited article is re-processed.
@@ -3094,6 +3177,56 @@ def _article_fields(article: Article) -> _ArticleSearchFields:
         fields = _ArticleSearchFields(title, summary)
         _ARTICLE_FIELDS_CACHE.set(key, fields)
     return fields
+
+
+# ---------------------------------------------------------------------------
+# Background work yields to user requests.
+# On a small Render instance (0.1-0.5 CPU) background CPU work directly slows
+# searches, so the warm-up/back-fill threads pause while requests are running.
+# ---------------------------------------------------------------------------
+_active_requests = 0
+_active_requests_lock = threading.Lock()
+
+
+def _wait_for_idle(max_wait_seconds: float = 3.0) -> None:
+    deadline = time.monotonic() + max_wait_seconds
+    while _active_requests > 0 and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def _backfill_search_columns() -> None:
+    """One-time fill of stored search text for articles created before this
+    version. Runs in small batches in the background and pauses while user
+    requests are active."""
+    total = 0
+    started = time.perf_counter()
+    try:
+        while True:
+            _wait_for_idle()
+            with SessionLocal() as db:
+                rows = db.execute(
+                    select(Article.id, Article.title, Article.summary)
+                    .where(Article.search_title.is_(None))
+                    .order_by(Article.published_at.desc().nullslast(), Article.id.desc())
+                    .limit(200)
+                ).all()
+                if not rows:
+                    break
+                updates = []
+                for article_id, title, summary in rows:
+                    values = _search_columns_for(title, summary)
+                    values["id"] = article_id
+                    updates.append(values)
+                    if len(updates) % 25 == 0:
+                        _wait_for_idle()
+                db.execute(sa_update(Article), updates)
+                db.commit()
+                total += len(rows)
+            time.sleep(0.05)
+        if total:
+            print(f"[search-backfill] stored search text for {total} articles in {time.perf_counter() - started:.1f}s", flush=True)
+    except Exception as exc:
+        print(f"[search-backfill] stopped: {exc}", flush=True)
 
 
 def _warm_search_cache() -> None:
@@ -3106,19 +3239,20 @@ def _warm_search_cache() -> None:
         started = time.perf_counter()
         with SessionLocal() as db:
             rows = db.execute(
-                select(Article.id, Article.title, Article.summary)
+                select(Article.id, Article.search_title, Article.search_summary, Article.search_entities)
+                .where(Article.search_title.is_not(None), Article.search_summary.is_not(None))
                 .order_by(Article.published_at.desc().nullslast(), Article.id.desc())
                 .limit(SEARCH_ARTICLE_CACHE_SIZE)
             ).all()
         # Oldest first, so the newest articles end up most-recently-used in the LRU.
-        for index, (article_id, title, summary) in enumerate(reversed(rows), 1):
-            title = title or ""
-            summary = summary or ""
-            key = (article_id, hash(title), hash(summary))
+        # Built from stored text: no HTML cleaning, ~25x cheaper per article.
+        for index, (article_id, title_n, summary_n, entities) in enumerate(reversed(rows), 1):
+            key = (article_id, "stored", hash(title_n), hash(summary_n))
             if _ARTICLE_FIELDS_CACHE.get(key) is None:
-                _ARTICLE_FIELDS_CACHE.set(key, _ArticleSearchFields(title, summary))
+                _ARTICLE_FIELDS_CACHE.set(key, _fields_from_stored(title_n, summary_n, entities))
             if index % 200 == 0:
-                time.sleep(0.005)  # yield the GIL to request threads
+                _wait_for_idle()
+                time.sleep(0.001)
         print(f"[search-cache] warmed {len(rows)} articles in {time.perf_counter() - started:.1f}s", flush=True)
     except Exception as exc:
         print(f"[search-cache] warm-up skipped: {exc}", flush=True)
@@ -4193,6 +4327,21 @@ SEARCH_RESULT_TTL = int(os.getenv("SEARCH_RESULT_TTL", "60"))
 _SEARCH_RESULT_CACHE = _TTLCache(maxsize=512)
 
 
+# Per-request phase timings, reported in the Server-Timing response header
+# (browser DevTools > Network > Timing) and by /api/search/diagnostics.
+_search_timing = contextvars.ContextVar("search_timing", default=None)
+
+
+def _timing_add(name: str, ms: float) -> None:
+    timing = _search_timing.get()
+    if timing is not None:
+        timing[name] = timing.get(name, 0.0) + ms
+
+
+def _server_timing_header(timing: dict) -> str:
+    return ", ".join(f"{name};dur={value:.1f}" for name, value in timing.items())
+
+
 def _search_ranked_payload(
     db: Session,
     q: str,
@@ -4209,6 +4358,7 @@ def _search_ranked_payload(
     Returns (results_payload, result_count). Moved out of search() unchanged
     so the result can be cached; quota logic stays in search().
     """
+    _phase_started = time.perf_counter()
     token_conditions = []
     retrieval_terms = set(tokens[:12])
 
@@ -4396,6 +4546,9 @@ def _search_ranked_payload(
             .limit(SEARCH_CANDIDATE_LIMIT)
         ).all()
 
+    _timing_add("sql", (time.perf_counter() - _phase_started) * 1000)
+    _phase_started = time.perf_counter()
+
     # Campus-aware hard gate. SQL token matching intentionally remains broad
     # for performance, but an IIT campus identifier must resolve to the same
     # canonical campus before the article can be returned. This is what keeps
@@ -4461,6 +4614,8 @@ def _search_ranked_payload(
     # IMPORTANT: a zero-result search does NOT consume quota.
     result_count = len(ranked_rows)
 
+    _timing_add("rank", (time.perf_counter() - _phase_started) * 1000)
+    _phase_started = time.perf_counter()
     results_payload = [
         {
             "id": article.id,
@@ -4486,6 +4641,7 @@ def _search_ranked_payload(
         for score, article, source_row in ranked_rows
     ]
 
+    _timing_add("serialize", (time.perf_counter() - _phase_started) * 1000)
     return results_payload, result_count
 
 
@@ -4521,6 +4677,7 @@ def _cached_ranked_search(
     cached_search = _SEARCH_RESULT_CACHE.get(search_cache_key)
     if cached_search is not None:
         results_payload, result_count = cached_search
+        _timing_add("cache_hit", 0)
     else:
         results_payload, result_count = _search_ranked_payload(
             db, q, query_text, tokens, search_context,
@@ -4529,6 +4686,53 @@ def _cached_ranked_search(
         _SEARCH_RESULT_CACHE.set(search_cache_key, (results_payload, result_count), SEARCH_RESULT_TTL)
     return results_payload, result_count, selected_categories
 
+
+
+@app.get("/api/search/diagnostics")
+def search_diagnostics(
+    key: str = Query(..., description="ADMIN_API_KEY"),
+    q: str = Query("kolkata", max_length=200),
+    db: Session = Depends(get_db),
+):
+    """Production troubleshooting: where does /api/search spend its time?
+
+    Open in a browser:  /api/search/diagnostics?key=<ADMIN_API_KEY>&q=kolkata
+    Runs the search twice WITHOUT the result cache and returns timings only
+    (no article content, no quota used).
+    """
+    if not hmac.compare_digest(str(key), str(ADMIN_API_KEY)):
+        raise HTTPException(status_code=401, detail="Invalid admin key")
+
+    report = {"query": q}
+
+    pings = []
+    for _ in range(5):
+        started = time.perf_counter()
+        db.execute(select(func.now())).scalar()
+        pings.append(round((time.perf_counter() - started) * 1000, 1))
+    report["db_round_trip_ms"] = pings
+
+    context = _prepare_search_context(q)
+    for label in ("first_run", "second_run"):
+        timing = {}
+        _search_timing.set(timing)
+        started = time.perf_counter()
+        payload, count = _search_ranked_payload(
+            db, q, context["q"], context["q_tokens"], context, "30", [], "", "",
+        )
+        timing["total"] = (time.perf_counter() - started) * 1000
+        report[label + "_ms"] = {name: round(value, 1) for name, value in timing.items()}
+        report["results"] = count
+        report["response_json_kb"] = round(len(json.dumps(payload, default=str)) / 1024, 1)
+
+    started = time.perf_counter()
+    report["articles_total"] = db.scalar(select(func.count()).select_from(Article))
+    report["count_query_ms"] = round((time.perf_counter() - started) * 1000, 1)
+    report["article_text_cache_entries"] = len(getattr(_ARTICLE_FIELDS_CACHE, "_data", {}))
+    report["warmup_running"] = any(t.name == "search-cache-warmup" for t in threading.enumerate())
+    report["cpu_count"] = os.cpu_count()
+    report["database_host"] = (urlparse(DATABASE_URL.replace("+psycopg", "")).hostname or "")
+    return report
 
 @app.get("/api/search/preview")
 def search_preview(
@@ -4550,6 +4754,9 @@ def search_preview(
     (active subscriber, or free searches remaining), so it cannot be used to
     read results after the free limit is reached.
     """
+    _timing = {}
+    _search_timing.set(_timing)
+    _request_started = time.perf_counter()
     subscriber = _subscriber_from_token(x_auth_token, db)
     if not subscriber:
         usage = db.scalar(select(Usage).where(Usage.user_key == user_key))
@@ -4567,6 +4774,9 @@ def search_preview(
         date_range, categories, language, source,
     )
     response.headers["Cache-Control"] = "private, max-age=60"
+    _timing["total"] = (time.perf_counter() - _request_started) * 1000
+    response.headers["Server-Timing"] = _server_timing_header(_timing)
+
     return {
         "status": "success",
         "query": q,
@@ -4651,6 +4861,7 @@ def search_prediction_index(
 
 @app.get("/api/search")
 def search(
+    response: Response,
     q: str = Query(min_length=1, max_length=200),
     user_key: str = Header(alias="X-User-Key"),
     x_auth_token: Optional[str] = Header(None, alias="X-Auth-Token"),
@@ -4661,6 +4872,10 @@ def search(
     source: str = Query("", max_length=255),
     db: Session = Depends(get_db),
 ):
+    _timing = {}
+    _search_timing.set(_timing)
+    _request_started = time.perf_counter()
+
     subscriber = _subscriber_from_token(
         x_auth_token,
         db,
@@ -4778,6 +4993,9 @@ def search(
         0,
         free_limit - searches_used,
     )
+
+    _timing["total"] = (time.perf_counter() - _request_started) * 1000
+    response.headers["Server-Timing"] = _server_timing_header(_timing)
 
     return {
         "status": "success",
