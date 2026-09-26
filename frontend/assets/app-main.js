@@ -36,10 +36,22 @@ if(!userKey){
 }
 
 
-let adminKey =
-    sessionStorage.getItem(
-        "ami_admin_key"
-    );
+let adminToken =
+    sessionStorage.getItem("ami_admin_token") || "";
+
+let adminUsername =
+    sessionStorage.getItem("ami_admin_username") || "";
+
+let adminRole =
+    sessionStorage.getItem("ami_admin_role") || "";
+
+let adminPermissions = (() => {
+    try{
+        return JSON.parse(sessionStorage.getItem("ami_admin_permissions") || "[]");
+    }catch(e){
+        return [];
+    }
+})();
 
 let subscriberToken =
     sessionStorage.getItem(
@@ -1835,69 +1847,60 @@ function updateSubscriberButton(){
 
 
 function openAdminLogin(){
-
-    document
-        .getElementById("adminLoginError")
-        .textContent = "";
-
-
-    document
-        .getElementById("adminKeyInput")
-        .value = "";
-
-
-    document
-        .getElementById("adminLoginModal")
-        .classList.add("show");
-
+    document.getElementById("adminLoginError").textContent = "";
+    document.getElementById("adminUsernameInput").value = adminUsername || "";
+    document.getElementById("adminPasswordInput").value = "";
+    document.getElementById("adminLoginModal").classList.add("show");
+    setTimeout(() => {
+        document.getElementById(
+            adminUsername
+                ? "adminPasswordInput"
+                : "adminUsernameInput"
+        ).focus();
+    }, 0);
 }
-
 
 function closeAdminLogin(){
-
-    document
-        .getElementById("adminLoginModal")
-        .classList.remove("show");
-
+    document.getElementById("adminLoginModal").classList.remove("show");
 }
-
 
 async function adminLogin(){
+    const username = document.getElementById("adminUsernameInput").value.trim();
+    const password = document.getElementById("adminPasswordInput").value;
+    const error = document.getElementById("adminLoginError");
+    error.textContent = "";
 
-    const key =
-        document
-            .getElementById("adminKeyInput")
-            .value
-            .trim();
-
-
-    if(!key){
-
-        document
-            .getElementById("adminLoginError")
-            .textContent =
-                "Please enter the Admin Key.";
-
+    if(!username || !password){
+        error.textContent = "Enter your username and password.";
         return;
-
     }
 
+    try{
+        const response = await fetch(API + "/api/admin/login", {
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({username, password})
+        });
+        const data = await response.json().catch(() => ({}));
+        if(!response.ok) throw new Error(data.detail || "Admin login failed.");
 
-    adminKey = key;
+        adminToken = data.token;
+        adminUsername = data.username || username;
+        adminRole = data.role || "admin";
+        adminPermissions = Array.isArray(data.permissions) ? data.permissions : [];
 
+        sessionStorage.setItem("ami_admin_token", adminToken);
+        sessionStorage.setItem("ami_admin_username", adminUsername);
+        sessionStorage.setItem("ami_admin_role", adminRole);
+        sessionStorage.setItem("ami_admin_permissions", JSON.stringify(adminPermissions));
 
-    sessionStorage.setItem(
-        "ami_admin_key",
-        adminKey
-    );
-
-
-    closeAdminLogin();
-
-    openAdminDashboard();
-
+        closeAdminLogin();
+        applyAdminAccess();
+        openAdminDashboard();
+    }catch(errorValue){
+        error.textContent = errorValue.message || "Admin login failed.";
+    }
 }
-
 
 /* =========================================================
    ADMIN DASHBOARD
@@ -1921,32 +1924,152 @@ function openAdminDashboard(){
             userKey;
 
 
-    loadAdminDashboard();
+    applyAdminAccess();
 
+    const firstAllowed = [...document.querySelectorAll(".admin-menu-button[data-admin-permission]")]
+        .find(button => button.style.display !== "none");
+
+    if(firstAllowed){
+        showAdminSection(
+            firstAllowed.getAttribute("onclick").match(/showAdminSection\('([^']+)/)?.[1] || "dashboard",
+            firstAllowed
+        );
+    }
 }
 
+async function adminLogout(){
+    try{
+        if(adminToken){
+            await fetch(API + "/api/admin/logout", {
+                method:"POST",
+                headers:adminHeaders()
+            });
+        }
+    }catch(e){}
 
-function adminLogout(){
+    sessionStorage.removeItem("ami_admin_token");
+    sessionStorage.removeItem("ami_admin_username");
+    sessionStorage.removeItem("ami_admin_role");
+    sessionStorage.removeItem("ami_admin_permissions");
 
-    sessionStorage.removeItem(
-        "ami_admin_key"
-    );
+    adminToken = null;
+    adminUsername = "";
+    adminRole = "";
+    adminPermissions = [];
 
-
-    adminKey = null;
-
-
-    document
-        .getElementById("adminDashboard")
-        .classList.remove("show");
-
-
-    document
-        .getElementById("publicApp")
-        .classList.remove("hidden");
-
+    document.getElementById("adminDashboard").classList.remove("show");
+    document.getElementById("publicApp").classList.remove("hidden");
 }
 
+function adminHasPermission(permission){
+    return adminRole === "superadmin" || adminPermissions.includes(permission);
+}
+
+function applyAdminAccess(){
+    document.querySelectorAll("[data-admin-permission]").forEach(button => {
+        button.style.display = adminHasPermission(button.dataset.adminPermission) ? "" : "none";
+    });
+    document.querySelectorAll("[data-admin-superadmin]").forEach(button => {
+        button.style.display = adminRole === "superadmin" ? "" : "none";
+    });
+    const title = document.querySelector(".admin-brand-sub");
+    if(title && adminUsername){
+        title.textContent = "MEDIA INTELLIGENCE ADMINISTRATION · " + adminUsername;
+    }
+}
+
+function renderAdminPermissionOptions(){
+    const host = document.getElementById("newAdminPermissions");
+    if(!host) return;
+    const permissions = [
+        ["dashboard","Dashboard"],
+        ["sources","Source Management"],
+        ["feeds","RSS Feed Management"],
+        ["epaper","ePaper Auto-Discovery"],
+        ["quota","Search Quota & Settings"],
+        ["subscribers","Paid Subscriber Management"],
+        ["users","User Quota Management"],
+        ["intelligence","Intelligence / Reports"]
+    ];
+    host.innerHTML = permissions.map(([key,label]) =>
+        '<label style="display:flex;align-items:center;gap:8px;padding:9px 10px;border:1px solid #dbe3ec;border-radius:8px;background:#fafcff;">' +
+        '<input type="checkbox" value="' + key + '" data-new-admin-permission>' +
+        '<span>' + escapeHtml(label) + '</span></label>'
+    ).join("");
+}
+
+async function loadAdminUsers(){
+    const body = document.getElementById("adminUsersTableBody");
+    if(!body) return;
+    body.innerHTML = '<tr><td colspan="6" style="padding:10px;">Loading administrators...</td></tr>';
+    try{
+        const response = await fetch(API + "/api/admin/admins", {headers:adminHeaders()});
+        const data = await response.json().catch(() => []);
+        if(!response.ok) throw new Error(data.detail || "Unable to load administrators.");
+        body.innerHTML = data.map(account => {
+            const privileges = account.role === "superadmin"
+                ? "All privileges"
+                : (account.permissions || []).map(p => escapeHtml(p)).join(", ") || "None";
+            const status = account.active ? "Active" : "Inactive";
+            const action = account.role === "superadmin"
+                ? "Protected"
+                : '<button class="table-action" onclick="toggleAdminUser(' + account.id + ',' + (!account.active) + ')">' + (account.active ? "Deactivate" : "Activate") + '</button>';
+            return '<tr>' +
+                '<td style="padding:10px;font-weight:700;">' + escapeHtml(account.username) + '</td>' +
+                '<td style="padding:10px;">' + escapeHtml(account.role) + '</td>' +
+                '<td style="padding:10px;">' + privileges + '</td>' +
+                '<td style="padding:10px;">' + status + '</td>' +
+                '<td style="padding:10px;">' + escapeHtml(account.last_login_at ? new Date(account.last_login_at).toLocaleString() : "Never") + '</td>' +
+                '<td style="padding:10px;">' + action + '</td>' +
+                '</tr>';
+        }).join("") || '<tr><td colspan="6" style="padding:10px;">No administrator accounts found.</td></tr>';
+    }catch(errorValue){
+        body.innerHTML = '<tr><td colspan="6" style="padding:10px;color:#a42525;">' + escapeHtml(errorValue.message) + '</td></tr>';
+    }
+}
+
+async function createAdminUser(){
+    const username = document.getElementById("newAdminUsername").value.trim();
+    const password = document.getElementById("newAdminPassword").value;
+    const permissions = [...document.querySelectorAll("[data-new-admin-permission]:checked")].map(x => x.value);
+    const result = document.getElementById("adminUserResult");
+    result.textContent = "";
+    if(!username || !password){
+        result.textContent = "Username and password are required.";
+        return;
+    }
+    try{
+        const response = await fetch(API + "/api/admin/admins", {
+            method:"POST",
+            headers:{...adminHeaders(),"Content-Type":"application/json"},
+            body:JSON.stringify({username,password,permissions})
+        });
+        const data = await response.json().catch(() => ({}));
+        if(!response.ok) throw new Error(data.detail || "Unable to create admin.");
+        result.textContent = "Admin account created successfully.";
+        document.getElementById("newAdminUsername").value = "";
+        document.getElementById("newAdminPassword").value = "";
+        document.querySelectorAll("[data-new-admin-permission]").forEach(x => x.checked = false);
+        loadAdminUsers();
+    }catch(errorValue){
+        result.textContent = errorValue.message || "Unable to create admin.";
+    }
+}
+
+async function toggleAdminUser(adminId, active){
+    try{
+        const response = await fetch(API + "/api/admin/admins/" + adminId, {
+            method:"PUT",
+            headers:{...adminHeaders(),"Content-Type":"application/json"},
+            body:JSON.stringify({active})
+        });
+        const data = await response.json().catch(() => ({}));
+        if(!response.ok) throw new Error(data.detail || "Unable to update admin.");
+        loadAdminUsers();
+    }catch(errorValue){
+        alert(errorValue.message || "Unable to update admin.");
+    }
+}
 
 function showAdminSection(
     section,
@@ -2042,6 +2165,11 @@ function showAdminSection(
 
     }
 
+    if(section === "admin-users" && adminRole === "superadmin"){
+        renderAdminPermissionOptions();
+        loadAdminUsers();
+    }
+
 }
 
 
@@ -2050,20 +2178,12 @@ function showAdminSection(
 ========================================================= */
 
 function adminHeaders(){
-
     return {
-
-        "X-Admin-Key":
-            adminKey ||
-
-            sessionStorage.getItem(
-                "ami_admin_key"
-            ) ||
-
+        "X-Admin-Token":
+            adminToken ||
+            sessionStorage.getItem("ami_admin_token") ||
             ""
-
     };
-
 }
 
 
@@ -4455,10 +4575,9 @@ refreshQuota();
 */
 
 
-if(adminKey){
-
+if(adminToken){
+    applyAdminAccess();
     openAdminDashboard();
-
 }
 
 

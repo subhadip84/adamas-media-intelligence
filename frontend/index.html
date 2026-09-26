@@ -582,11 +582,11 @@
         </div>
 <div class="modal-text">
 
-            Enter the administrator key to access
-            the Adamas Media Intelligence Dashboard.
+            Sign in with your administrator username and password.
 
         </div>
-<input class="login-input" id="adminKeyInput" placeholder="Enter Admin Key" type="password"/>
+<input autocomplete="username" class="login-input" id="adminUsernameInput" placeholder="Username" type="text"/>
+<input autocomplete="current-password" class="login-input" id="adminPasswordInput" placeholder="Password" type="password"/>
 <div class="login-error" id="adminLoginError"></div>
 <div class="modal-actions">
 <button class="btn btn-secondary" onclick="closeAdminLogin()">
@@ -703,29 +703,34 @@
      ADMIN SIDEBAR
 ===================================================== -->
 <aside class="admin-sidebar">
-<button class="admin-menu-button active" onclick="showAdminSection('dashboard',this)">
+<button class="admin-menu-button active" data-admin-permission="dashboard" onclick="showAdminSection('dashboard',this)">
 
         ▦ Dashboard
 
     </button>
-<button class="admin-menu-button" onclick="showAdminSection('sources',this)">
+<button class="admin-menu-button" data-admin-permission="sources" onclick="showAdminSection('sources',this)">
 
         ◉ Source Management
 
     </button>
-<button class="admin-menu-button" onclick="showAdminSection('feeds',this)">
+<button class="admin-menu-button" data-admin-permission="feeds" onclick="showAdminSection('feeds',this)">
 
         ☊ RSS Feed Management
 
     </button>
-<button class="admin-menu-button" onclick="showAdminSection('epaper',this)">
+<button class="admin-menu-button" data-admin-permission="epaper" onclick="showAdminSection('epaper',this)">
 
         📰 ePaper Auto-Discovery
 
     </button>
-<button class="admin-menu-button" onclick="showAdminSection('quota',this)">
+<button class="admin-menu-button" data-admin-permission="quota" onclick="showAdminSection('quota',this)">
 
         ⟳ Search Quota &amp; Settings
+
+    </button>
+<button class="admin-menu-button" data-admin-superadmin="true" id="adminUsersMenuButton" onclick="showAdminSection('admin-users',this)">
+
+        ◈ Admin Users
 
     </button>
 <button class="admin-menu-button" onclick="adminLogout()">
@@ -1040,6 +1045,51 @@
     <div id="epaperSavedList" class="epaper-saved-list">
         <div class="epaper-note">No saved editions loaded.</div>
     </div>
+</div>
+</section>
+<!-- ADMIN USER MANAGEMENT -->
+<section class="admin-section" id="admin-admin-users-section" style="display:none">
+<div class="admin-page-title">Admin Users</div>
+<div class="admin-page-subtitle">Create administrators and assign the modules they are allowed to manage.</div>
+<div class="admin-panel">
+<div class="admin-panel-title">Create New Admin</div>
+<div style="display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:14px;margin-top:14px;">
+<div>
+<label style="display:block;margin-bottom:8px;font-size:13px;font-weight:700;">Username</label>
+<input class="login-input" id="newAdminUsername" placeholder="e.g. media-admin" style="margin-top:0;" type="text"/>
+</div>
+<div>
+<label style="display:block;margin-bottom:8px;font-size:13px;font-weight:700;">Temporary / Initial Password</label>
+<input class="login-input" id="newAdminPassword" placeholder="Minimum 8 characters" style="margin-top:0;" type="password"/>
+</div>
+</div>
+<div style="margin-top:18px;">
+<label style="display:block;margin-bottom:10px;font-size:13px;font-weight:700;">Privileges</label>
+<div id="newAdminPermissions" style="display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:10px;"></div>
+</div>
+<div style="display:flex;justify-content:flex-end;margin-top:18px;">
+<button class="btn btn-primary" onclick="createAdminUser()">Create Admin</button>
+</div>
+<div class="reset-result" id="adminUserResult" style="margin-top:12px;"></div>
+</div>
+<div class="admin-panel">
+<div class="admin-panel-header">
+<div class="admin-panel-title">Administrator Accounts</div>
+<button class="btn" onclick="loadAdminUsers()" style="background:#f5f8fc;color:#17395f;border:1px solid #cbd8e7">↻ Refresh</button>
+</div>
+<div style="overflow:auto;margin-top:12px;">
+<table style="width:100%;border-collapse:collapse;min-width:780px;">
+<thead><tr>
+<th style="text-align:left;padding:10px;">Username</th>
+<th style="text-align:left;padding:10px;">Role</th>
+<th style="text-align:left;padding:10px;">Privileges</th>
+<th style="text-align:left;padding:10px;">Status</th>
+<th style="text-align:left;padding:10px;">Last Login</th>
+<th style="text-align:left;padding:10px;">Action</th>
+</tr></thead>
+<tbody id="adminUsersTableBody"><tr><td colspan="6" style="padding:10px;">Loading administrators...</td></tr></tbody>
+</table>
+</div>
 </div>
 </section>
 <!-- QUOTA RESET -->

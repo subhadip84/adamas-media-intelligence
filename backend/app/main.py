@@ -1,4 +1,4 @@
-﻿import time
+import time
 import os
 import csv
 import hashlib
@@ -29,6 +29,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Header,
+    Request,
     Query,
     UploadFile,
     File,
@@ -207,6 +208,20 @@ ADMIN_API_KEY = os.getenv(
     "ADMIN_API_KEY",
     "change-this-admin-key",
 )
+SUPER_ADMIN_USERNAME = os.getenv("SUPER_ADMIN_USERNAME", "admin").strip() or "admin"
+SUPER_ADMIN_PASSWORD = os.getenv("SUPER_ADMIN_PASSWORD", "").strip()
+ADMIN_TOKEN_DAYS = int(os.getenv("ADMIN_TOKEN_DAYS", "30") or "30")
+
+ADMIN_PERMISSIONS = {
+    "dashboard": "Dashboard",
+    "sources": "Source Management",
+    "feeds": "RSS Feed Management",
+    "epaper": "ePaper Auto-Discovery",
+    "quota": "Search Quota & Settings",
+    "subscribers": "Paid Subscriber Management",
+    "users": "User Quota Management",
+    "intelligence": "Intelligence / Reports",
+}
 
 FREE_SEARCH_LIMIT = int(
     os.getenv(
@@ -865,6 +880,27 @@ class TrackedTopic(Base):
     query: Mapped[str] = mapped_column(String(500))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class AdminAccount(Base):
+    __tablename__ = "admin_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(30), default="admin", index=True)
+    permissions_json: Mapped[str] = mapped_column(Text, default="[]")
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    auth_token: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True, index=True)
+    token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
 
 class SavedSearch(Base):
     __tablename__ = "saved_searches"
@@ -2114,6 +2150,28 @@ async def _run_discovery_job():
             "error": str(exc)[:2000],
         })
 
+def _ensure_super_admin() -> None:
+    if not SUPER_ADMIN_PASSWORD:
+        return
+    with SessionLocal() as db:
+        username = SUPER_ADMIN_USERNAME.lower()
+        account = db.scalar(select(AdminAccount).where(AdminAccount.username == username))
+        if account is None:
+            db.add(AdminAccount(
+                username=username,
+                password_hash=_password_hash(SUPER_ADMIN_PASSWORD),
+                role="superadmin",
+                permissions_json=json.dumps(sorted(ADMIN_PERMISSIONS.keys())),
+                active=True,
+                created_by="system",
+            ))
+            db.commit()
+        elif account.role != "superadmin":
+            account.role = "superadmin"
+            account.permissions_json = json.dumps(sorted(ADMIN_PERMISSIONS.keys()))
+            db.commit()
+
+
 @app.on_event("startup")
 def startup():
 
@@ -2135,6 +2193,8 @@ def startup():
 
     if last_error is not None:
         raise last_error
+
+    _ensure_super_admin()
 
     # Additive column upgrade (image_checked_at) before serving requests.
     _ensure_schema()
@@ -2455,59 +2515,262 @@ def subscriber_logout(
 # ADMIN AUTHENTICATION
 # =========================================================
 
+def _admin_permissions(account: AdminAccount) -> set[str]:
+    if account.role == "superadmin":
+        return set(ADMIN_PERMISSIONS.keys())
+    try:
+        values = json.loads(account.permissions_json or "[]")
+        return {str(v) for v in values if str(v) in ADMIN_PERMISSIONS}
+    except Exception:
+        return set()
+
+
+def _admin_from_token(token: Optional[str], db: Session) -> Optional[AdminAccount]:
+    token = str(token or "").strip()
+    if not token:
+        return None
+    account = db.scalar(select(AdminAccount).where(AdminAccount.auth_token == token))
+    if not account or not account.active:
+        return None
+    if account.token_expires_at and account.token_expires_at < datetime.now(timezone.utc):
+        return None
+    return account
+
+
+def _admin_permission_for_path(path: str) -> Optional[str]:
+    if path.endswith("/dashboard"):
+        return "dashboard"
+    if "/sources" in path:
+        return "sources"
+    if "/feeds" in path:
+        return "feeds"
+    if "/epaper/" in path:
+        return "epaper"
+    if "/settings/search-quota" in path or "/settings/auto-rss-discovery" in path:
+        return "quota"
+    if "/subscribers" in path:
+        return "subscribers"
+    if "/users" in path:
+        return "users"
+    if "/intelligence" in path or "/reports" in path:
+        return "intelligence"
+    return None
+
+
 def require_admin(
-
-    x_admin_key: str = Header(
-        alias="X-Admin-Key",
-    )
-
+    request: Request,
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key"),
+    db: Session = Depends(get_db),
 ):
+    account = _admin_from_token(x_admin_token, db)
+    if account:
+        permission = _admin_permission_for_path(request.url.path)
+        if permission and permission not in _admin_permissions(account):
+            raise HTTPException(status_code=403, detail=f"Admin permission required: {ADMIN_PERMISSIONS[permission]}")
+        return account
 
-    if x_admin_key != ADMIN_API_KEY:
+    # Backward-compatible bootstrap access. The existing API key remains a
+    # super-admin credential so an existing deployment cannot be locked out.
+    if x_admin_key and hmac.compare_digest(str(x_admin_key), str(ADMIN_API_KEY)):
+        return {
+            "role": "superadmin",
+            "username": SUPER_ADMIN_USERNAME,
+            "legacy_key": True,
+        }
 
-        raise HTTPException(
-
-            status_code=401,
-
-            detail=
-            "Invalid admin key",
-
-        )
+    raise HTTPException(status_code=401, detail="Admin authentication required")
 
 
 # =========================================================
 # ADMIN LOGIN
 # =========================================================
 
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AdminCreateRequest(BaseModel):
+    username: str
+    password: str
+    permissions: list[str] = []
+
+
+class AdminUpdateRequest(BaseModel):
+    password: Optional[str] = None
+    permissions: Optional[list[str]] = None
+    active: Optional[bool] = None
+
+
+def _admin_public(account: AdminAccount) -> dict:
+    return {
+        "id": account.id,
+        "username": account.username,
+        "role": account.role,
+        "permissions": sorted(_admin_permissions(account)),
+        "active": account.active,
+        "last_login_at": account.last_login_at,
+        "created_at": account.created_at,
+    }
+
+
 @app.post("/api/admin/login")
 def admin_login(
-
-    x_admin_key: str = Header(
-        alias="X-Admin-Key",
-    )
-
+    payload: AdminLoginRequest,
+    db: Session = Depends(get_db),
 ):
+    username = payload.username.strip().lower()
+    if not username or not payload.password:
+        raise HTTPException(status_code=400, detail="Username and password are required.")
 
-    if x_admin_key != ADMIN_API_KEY:
+    account = db.scalar(select(AdminAccount).where(AdminAccount.username == username))
+    if not account or not account.active or not _password_verify(payload.password, account.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
 
-        raise HTTPException(
-
-            status_code=401,
-
-            detail=
-            "Invalid admin key",
-
-        )
+    token = secrets.token_urlsafe(48)
+    now = datetime.now(timezone.utc)
+    account.auth_token = token
+    account.token_expires_at = now + timedelta(days=ADMIN_TOKEN_DAYS)
+    account.last_login_at = now
+    db.commit()
 
     return {
-
-        "status":
-        "success",
-
-        "message":
-        "Admin authenticated successfully.",
-
+        "status": "success",
+        "message": "Admin authenticated successfully.",
+        "token": token,
+        "username": account.username,
+        "role": account.role,
+        "permissions": sorted(_admin_permissions(account)),
+        "expires_at": account.token_expires_at,
     }
+
+
+@app.post("/api/admin/logout")
+def admin_logout(
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+    db: Session = Depends(get_db),
+):
+    account = _admin_from_token(x_admin_token, db)
+    if account:
+        account.auth_token = None
+        account.token_expires_at = None
+        db.commit()
+    return {"status": "success"}
+
+
+@app.get("/api/admin/me")
+def admin_me(account=Depends(require_admin)):
+    if isinstance(account, dict):
+        return {
+            "username": account["username"],
+            "role": "superadmin",
+            "permissions": sorted(ADMIN_PERMISSIONS.keys()),
+        }
+    return _admin_public(account)
+
+
+# =========================================================
+# SUPER ADMIN — ADMIN USER MANAGEMENT
+# =========================================================
+
+def require_super_admin(account=Depends(require_admin)):
+    if isinstance(account, dict):
+        return account
+    if account.role != "superadmin":
+        raise HTTPException(status_code=403, detail="Super Admin access required.")
+    return account
+
+
+@app.get("/api/admin/admins")
+def list_admin_accounts(
+    _: object = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    accounts = db.scalars(select(AdminAccount).order_by(AdminAccount.id)).all()
+    return [_admin_public(account) for account in accounts]
+
+
+@app.post("/api/admin/admins")
+def create_admin_account(
+    payload: AdminCreateRequest,
+    actor=Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    username = payload.username.strip().lower()
+    password = payload.password or ""
+    permissions = sorted({p for p in payload.permissions if p in ADMIN_PERMISSIONS})
+    if not username or len(username) < 3:
+        raise HTTPException(status_code=400, detail="Username must contain at least 3 characters.")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must contain at least 8 characters.")
+
+    existing = db.scalar(select(AdminAccount).where(AdminAccount.username == username))
+    if existing:
+        raise HTTPException(status_code=409, detail="That admin username already exists.")
+
+    account = AdminAccount(
+        username=username,
+        password_hash=_password_hash(password),
+        role="admin",
+        permissions_json=json.dumps(permissions),
+        active=True,
+        created_by=actor.get("username") if isinstance(actor, dict) else actor.username,
+    )
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return _admin_public(account)
+
+
+@app.put("/api/admin/admins/{admin_id}")
+def update_admin_account(
+    admin_id: int,
+    payload: AdminUpdateRequest,
+    _: object = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    account = db.get(AdminAccount, admin_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Admin account not found.")
+    if account.role == "superadmin":
+        raise HTTPException(status_code=400, detail="The Super Admin account cannot be modified here.")
+
+    if payload.password is not None:
+        if len(payload.password) < 8:
+            raise HTTPException(status_code=400, detail="Password must contain at least 8 characters.")
+        account.password_hash = _password_hash(payload.password)
+        account.auth_token = None
+        account.token_expires_at = None
+    if payload.permissions is not None:
+        account.permissions_json = json.dumps(sorted({p for p in payload.permissions if p in ADMIN_PERMISSIONS}))
+    if payload.active is not None:
+        account.active = bool(payload.active)
+        if not account.active:
+            account.auth_token = None
+            account.token_expires_at = None
+
+    db.commit()
+    db.refresh(account)
+    return _admin_public(account)
+
+
+@app.delete("/api/admin/admins/{admin_id}")
+def deactivate_admin_account(
+    admin_id: int,
+    _: object = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    account = db.get(AdminAccount, admin_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Admin account not found.")
+    if account.role == "superadmin":
+        raise HTTPException(status_code=400, detail="The Super Admin account cannot be deleted.")
+    account.active = False
+    account.auth_token = None
+    account.token_expires_at = None
+    db.commit()
+    return {"status": "success", "message": "Admin account deactivated."}
 
 
 # =========================================================
