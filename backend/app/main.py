@@ -5122,6 +5122,75 @@ def search_prediction_index(
     _PREDICTION_INDEX_CACHE.set("index", payload, PREDICTION_INDEX_TTL)
     return payload
 
+def google_news_rss_fallback(query: str, limit: int = 20):
+    try:
+        import feedparser
+        import httpx
+        from urllib.parse import quote_plus
+
+        rss_url = (
+            "https://news.google.com/rss/search?q="
+            + quote_plus(query)
+            + "&hl=en-IN&gl=IN&ceid=IN:en"
+        )
+
+        with httpx.Client(
+            timeout=10.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Adamas-Media-Intelligence/1.0"},
+        ) as client:
+            response = client.get(rss_url)
+            response.raise_for_status()
+
+        feed = feedparser.parse(response.content)
+        results = []
+
+        for entry in feed.entries[:limit]:
+            title = (getattr(entry, "title", "") or "").strip()
+            link = (getattr(entry, "link", "") or "").strip()
+            summary = (getattr(entry, "summary", "") or "").strip()
+            published = (
+                getattr(entry, "published", "")
+                or getattr(entry, "updated", "")
+                or ""
+            ).strip()
+
+            source_name = ""
+            source_obj = getattr(entry, "source", None)
+            if source_obj:
+                source_name = (
+                    getattr(source_obj, "title", "")
+                    or getattr(source_obj, "href", "")
+                    or ""
+                ).strip()
+
+            if not title or not link:
+                continue
+
+            results.append(
+                {
+                    "id": None,
+                    "title": title,
+                    "url": link,
+                    "link": link,
+                    "summary": summary,
+                    "content": summary,
+                    "source": source_name or "Google News",
+                    "source_name": source_name or "Google News",
+                    "published_at": published,
+                    "image_url": None,
+                    "category": "",
+                    "language": "",
+                    "is_rss_fallback": True,
+                }
+            )
+
+        return results
+
+    except Exception as exc:
+        print(f"Google News RSS fallback failed: {exc}")
+        return []
+
 @app.get("/api/search")
 def search(
     response: Response,
@@ -5222,6 +5291,67 @@ def search(
         date_range, categories, language, source,
     )
 
+    # Google News RSS fallback:
+    # Keep the existing relevance scorer unchanged.
+    # For India-context queries, local results must contain both:
+    #   1) a meaningful topic term, and
+    #   2) India context (India / Indian / India's / relevant India place)
+    # This prevents generic education articles from blocking Google News.
+    # Filter-only requests remain local-only.
+    _rss_generic_terms = {
+        "a", "an", "and", "are", "as", "at", "by", "for", "from",
+        "in", "is", "latest", "news", "of", "on", "status", "the",
+        "to", "today", "with", "current"
+    }
+
+    _rss_query_terms = [
+        token
+        for token in _query_tokens(query_text)
+        if token not in _rss_generic_terms
+        and token.casefold() not in {"india", "indian", "indias"}
+        and len(token) >= 2
+    ]
+
+    _rss_has_india_context = any(
+        token.casefold() in {"india", "indian", "indias"}
+        for token in _query_tokens(query_text)
+    )
+
+    _rss_topic_match = False
+
+    if _rss_query_terms:
+        for _rss_item in results_payload:
+            if not isinstance(_rss_item, dict):
+                continue
+
+            _rss_title = str(_rss_item.get("title") or "").casefold()
+
+            _rss_has_topic = any(
+                token.casefold() in _rss_title
+                for token in _rss_query_terms
+            )
+
+            _rss_has_context = (
+                ("india" in _rss_title)
+                or ("indian" in _rss_title)
+                or ("india's" in _rss_title)
+            )
+
+            if _rss_has_topic and (
+                not _rss_has_india_context or _rss_has_context
+            ):
+                _rss_topic_match = True
+                break
+
+    if (
+        not filter_only
+        and query_text
+        and (result_count == 0 or not _rss_topic_match)
+    ):
+        fallback_payload = google_news_rss_fallback(q)
+        if fallback_payload:
+            results_payload = fallback_payload
+            result_count = len(fallback_payload)
     # Only a new user search is counted. Filter-only refreshes are generated
     # by changing Date/Category/Language/Source and must not consume quota or
     # alter search popularity statistics.
